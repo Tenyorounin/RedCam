@@ -224,7 +224,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
         }
-        strengthRow.addView(TextView(this).apply { text = "M9 Look"; textSize = 12f; setTextColor(0xffd4d4d8.toInt()) })
+        strengthRow.addView(TextView(this).apply { text = "UltraTone Style"; textSize = 12f; setTextColor(0xffd4d4d8.toInt()) })
         strength = SeekBar(this).apply {
             max = 100
             progress = 100
@@ -294,7 +294,7 @@ class MainActivity : ComponentActivity() {
         captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(52), dp(52)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         shutterButton = ImageButton(this).apply {
-            contentDescription = "Take photo and apply the Leica M9-inspired ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} rendering"
+            contentDescription = "Take photo with the selected ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} style"
             background = rounded(Color.WHITE, 50)
             setImageDrawable(null)
             setPadding(dp(6), dp(6), dp(6), dp(6))
@@ -758,6 +758,7 @@ class MainActivity : ComponentActivity() {
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish
     ) {
+        runOnUiThread { status.text = "Processing photo…" }
         var style: Bitmap? = null
         var final: Bitmap? = null
         try {
@@ -772,6 +773,7 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
+            runOnUiThread { status.text = "Saving photo…" }
             val uri = saveBitmap(rendered)
             lastPhotoUri = uri
             val savedPortrait = portrait
@@ -942,7 +944,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateStatus() {
-        if (!isBusy) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "M9 Colour" else "B&W"} · ${strength.progress}%"
+        if (!isBusy) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"} · ${strength.progress}%"
     }
 
     private fun pill(label: String, action: () -> Unit): TextView = TextView(this).apply {

@@ -8,13 +8,17 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Device-independent Leica M9-inspired rendering applied to the camera JPEG.
- * This is an original adaptive grade; it does not reproduce the M9 sensor, lens,
- * demosaicing, or Leica's proprietary JPEG pipeline.
+ * Device-independent adaptive colour rendering applied to the camera JPEG.
+ * The profile adjusts tone, saturation, and selective hue response per scene.
  */
 object ReferenceRenderer {
     enum class Mode { DAY, NIGHT, PORTRAIT }
     enum class Finish { COLOUR, BLACK_AND_WHITE }
+
+    // Hue curves are constant, so build them once instead of evaluating several
+    // exponentials for every pixel in a full-resolution capture.
+    private val hueShiftTable = FloatArray(361) { selectiveHueShift(it.toFloat()) }
+    private val greenHueTable = FloatArray(361) { gaussianHue(it.toFloat(), 118f, 38f) }
 
     fun render(
         source: Bitmap,
@@ -120,8 +124,8 @@ object ReferenceRenderer {
                 val localDetail = luma - (left + right + top + bottom) * 0.25f
 
                 val bw = finish == Finish.BLACK_AND_WHITE
-                // M9-like contrast with a soft toe: preserve form in dark tones,
-                // while compressing only the upper end of the mobile JPEG range.
+                // Preserve form in dark tones while compressing only the upper
+                // end of the mobile JPEG range.
                 val contrast = sceneContrast + if (bw) 0.09f else 0f
                 var target = (luma - 0.46f) * contrast + 0.46f + keyBias
                 val toe = smoothstep(((0.30f - target) / 0.30f).coerceIn(0f, 1f))
@@ -148,8 +152,8 @@ object ReferenceRenderer {
                 val hue = hsv[0]
                 val saturation = hsv[1]
                 val value = hsv[2]
-                val hueShift = m9HueShift(hue)
-                val greenWeight = gaussianHue(hue, 118f, 38f)
+                val hueShift = lookupHue(hueShiftTable, hue)
+                val greenWeight = lookupHue(greenHueTable, hue)
                 val saturationBoost = (sceneSaturation - 1f) * smoothstep(((saturation - 0.16f) / 0.62f).coerceIn(0f, 1f))
                 val shadowChromaRetention = if (mode == Mode.NIGHT) 0.70f + 0.30f * smoothstep(((luma - 0.035f) / 0.24f).coerceIn(0f, 1f)) else 1f
                 val adjustedSaturation = ((saturation + saturationBoost - 0.055f * greenWeight * (1f - smoothstep(((value - 0.25f) / 0.55f).coerceIn(0f, 1f)))) * shadowChromaRetention)
@@ -157,13 +161,12 @@ object ReferenceRenderer {
                 hsv[0] = (hue + hueShift * amount).let { (it % 360f + 360f) % 360f }
                 hsv[1] = saturation + (adjustedSaturation - saturation) * amount
                 hsv[2] = 1f
-                val fullColor = Color.HSVToColor(hsv)
-                val fullLuma = lumaOf(fullColor).coerceAtLeast(0.02f)
+                val fullLuma = hsvUnitLuma(hsv[0], hsv[1]).coerceAtLeast(0.02f)
                 val targetValue = (target / fullLuma).coerceIn(0f, 1f)
                 hsv[2] = value + (targetValue - value) * amount
 
-                // Mild warm highlights and cooler shadows imitate the M9's
-                // film-like colour separation without applying a fixed LUT tint.
+                // Mild warm highlights and cooler shadows give the image a
+                // restrained colour separation without applying a fixed tint.
                 val shadowWeight = 1f - smoothstep(((luma - 0.12f) / 0.48f).coerceIn(0f, 1f))
                 val highlightWeight = smoothstep(((luma - 0.56f) / 0.40f).coerceIn(0f, 1f))
                 val graded = Color.HSVToColor(hsv)
@@ -190,11 +193,38 @@ object ReferenceRenderer {
         return 255
     }
 
-    private fun m9HueShift(hue: Float): Float =
+    private fun selectiveHueShift(hue: Float): Float =
         gaussianHue(hue, 4f, 20f) * 4.5f +
             gaussianHue(hue, 30f, 17f) * 4.0f +
             gaussianHue(hue, 59f, 19f) * 5.0f +
             gaussianHue(hue, 188f, 26f) * 10.0f
+
+    private fun lookupHue(table: FloatArray, hue: Float): Float {
+        val wrapped = (hue % 360f + 360f) % 360f
+        val lower = wrapped.toInt()
+        val fraction = wrapped - lower
+        return table[lower] + (table[lower + 1] - table[lower]) * fraction
+    }
+
+    private fun hsvUnitLuma(hue: Float, saturation: Float): Float {
+        val sectorPosition = hue / 60f
+        val sector = sectorPosition.toInt().coerceIn(0, 5)
+        val chroma = saturation.coerceIn(0f, 1f)
+        val secondary = chroma * (1f - abs(sectorPosition % 2f - 1f))
+        var r = 0f
+        var g = 0f
+        var b = 0f
+        when (sector) {
+            0 -> { r = chroma; g = secondary }
+            1 -> { r = secondary; g = chroma }
+            2 -> { g = chroma; b = secondary }
+            3 -> { g = secondary; b = chroma }
+            4 -> { r = secondary; b = chroma }
+            else -> { r = chroma; b = secondary }
+        }
+        val offset = 1f - chroma
+        return 0.2126f * (r + offset) + 0.7152f * (g + offset) + 0.0722f * (b + offset)
+    }
 
     private fun gaussianHue(hue: Float, center: Float, width: Float): Float {
         val direct = abs(hue - center)
