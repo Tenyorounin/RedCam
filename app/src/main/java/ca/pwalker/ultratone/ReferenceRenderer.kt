@@ -152,7 +152,7 @@ object ReferenceRenderer {
     }
 
     private fun percentile(histogram: IntArray, total: Long, fraction: Float): Int {
-        val threshold = (total * fraction).toLong()
+        val threshold = (total.toFloat() * fraction).toLong()
         var accumulated = 0L
         for (i in histogram.indices) {
             accumulated += histogram[i]
