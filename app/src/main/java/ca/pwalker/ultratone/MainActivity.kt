@@ -17,6 +17,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
 import android.view.Gravity
+import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -54,6 +55,7 @@ import androidx.lifecycle.Observer
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
@@ -65,7 +67,16 @@ class MainActivity : ComponentActivity() {
     private lateinit var exposureRow: LinearLayout
     private lateinit var exposure: SeekBar
     private lateinit var exposureLabel: TextView
+    private lateinit var detailMergeButton: TextView
+    private lateinit var focusIndicator: View
     private var exposureRange = 0..0
+    @Volatile private var multiFrameDetailEnabled = false
+    private val focusIndicatorHandler = Handler(Looper.getMainLooper())
+    private val hideFocusIndicator = Runnable {
+        if (::focusIndicator.isInitialized) {
+            focusIndicator.animate().alpha(0f).setDuration(180L).withEndAction { focusIndicator.visibility = View.GONE }.start()
+        }
+    }
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var photoProcessingExecutor: ExecutorService
@@ -125,6 +136,7 @@ class MainActivity : ComponentActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
+        multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -151,6 +163,15 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Live camera viewfinder. Tap to focus; pinch to zoom."
         }
         liveCameraEffect = LiveCameraEffect.attach(previewView)
+        focusIndicator = View(this).apply {
+            background = roundedStroke(0x00000000, 0xffffd052.toInt(), 2, 50)
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+            elevation = dp(4).toFloat()
+            contentDescription = "Selected focus point"
+        }
+        previewView.addView(focusIndicator, FrameLayout.LayoutParams(dp(56), dp(56)))
         imageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
             translationY = -dp(42).toFloat()
@@ -293,6 +314,20 @@ class MainActivity : ComponentActivity() {
         exposureRow.addView(exposure, LinearLayout.LayoutParams(0, dp(36), 1f))
         bottom.addView(exposureRow)
 
+        detailMergeButton = pill("") { toggleMultiFrameDetail() }.apply {
+            visibility = View.GONE
+            textSize = 12f
+            maxLines = 1
+            contentDescription = "Two-frame deblur and detail merge. Off"
+        }
+        bottom.addView(detailMergeButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply {
+            topMargin = dp(2)
+            bottomMargin = dp(2)
+        })
+        updateDetailMergeButton()
+
         captureControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -336,8 +371,9 @@ class MainActivity : ComponentActivity() {
         captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(64), dp(64)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         captureControls.addView(pill("More") {
-            val show = strengthRow.visibility != View.VISIBLE
+            val show = detailMergeButton.visibility != View.VISIBLE
             strengthRow.visibility = if (show) View.VISIBLE else View.GONE
+            detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
             if (previewView.visibility == View.VISIBLE) updateExposureControl(show)
         },
             LinearLayout.LayoutParams(dp(54), dp(36)))
@@ -418,7 +454,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun attachPreviewGestures() {
-        val detector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        val zoomDetector = ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val camera = boundCamera ?: return false
                 val state = camera.cameraInfo.zoomState.value ?: return false
@@ -426,32 +462,60 @@ class MainActivity : ComponentActivity() {
                 return true
             }
         })
-        previewView.setOnTouchListener { view, event ->
-            detector.onTouchEvent(event)
-            if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
-                focusX = (event.x / view.width.coerceAtLeast(1)).coerceIn(0f, 1f)
-                focusY = (event.y / view.height.coerceAtLeast(1)).coerceIn(0f, 1f)
-                liveCameraEffect?.setFocus(focusX, focusY)
-                try {
-                    val factory: MeteringPointFactory = previewView.meteringPointFactory
-                    val point = factory.createPoint(event.x, event.y)
-                    boundCamera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
-                } catch (_: Exception) { }
+
+        fun attachTapFocus(view: View) {
+            val tapDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(event: MotionEvent): Boolean = true
+                override fun onSingleTapUp(event: MotionEvent): Boolean {
+                    focusOnPreview(view, event.x, event.y)
+                    return true
+                }
+            })
+            view.setOnTouchListener { _, event ->
+                zoomDetector.onTouchEvent(event)
+                tapDetector.onTouchEvent(event)
+                true
             }
-            true
         }
-        processedPreviewView.setOnTouchListener { _, event ->
-            detector.onTouchEvent(event)
-            if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
-                focusX = (event.x / processedPreviewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
-                focusY = (event.y / processedPreviewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
-                try {
-                    val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
-                    boundCamera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
-                } catch (_: Exception) { }
-            }
-            true
-        }
+        attachTapFocus(previewView)
+        attachTapFocus(processedPreviewView)
+    }
+
+    private fun focusOnPreview(source: View, x: Float, y: Float) {
+        val sourceLocation = IntArray(2)
+        val previewLocation = IntArray(2)
+        source.getLocationOnScreen(sourceLocation)
+        previewView.getLocationOnScreen(previewLocation)
+        val previewX = sourceLocation[0] - previewLocation[0] + x
+        val previewY = sourceLocation[1] - previewLocation[1] + y
+        if (previewX !in 0f..previewView.width.toFloat() || previewY !in 0f..previewView.height.toFloat()) return
+
+        focusX = (previewX / previewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+        focusY = (previewY / previewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
+        liveCameraEffect?.setFocus(focusX, focusY)
+        showFocusIndicator(previewX, previewY)
+
+        try {
+            val point = previewView.meteringPointFactory.createPoint(previewX, previewY, 0.12f)
+            val action = FocusMeteringAction.Builder(point)
+                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                .build()
+            boundCamera?.cameraControl?.startFocusAndMetering(action)
+        } catch (_: Exception) { }
+        source.performClick()
+    }
+
+    private fun showFocusIndicator(x: Float, y: Float) {
+        focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
+        val size = dp(56).toFloat()
+        focusIndicator.translationX = x - size / 2f
+        focusIndicator.translationY = y - size / 2f
+        focusIndicator.alpha = 0f
+        focusIndicator.scaleX = 0.82f
+        focusIndicator.scaleY = 0.82f
+        focusIndicator.visibility = View.VISIBLE
+        focusIndicator.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(140L).start()
+        focusIndicatorHandler.postDelayed(hideFocusIndicator, 1_100L)
     }
 
     private fun startCamera() {
@@ -847,6 +911,23 @@ class MainActivity : ComponentActivity() {
         view.layoutParams = lp
     }
 
+    private fun toggleMultiFrameDetail() {
+        multiFrameDetailEnabled = !multiFrameDetailEnabled
+        getPreferences(MODE_PRIVATE).edit()
+            .putBoolean("multi_frame_detail_enabled", multiFrameDetailEnabled)
+            .apply()
+        updateDetailMergeButton()
+    }
+
+    private fun updateDetailMergeButton() {
+        if (!::detailMergeButton.isInitialized) return
+        val state = if (multiFrameDetailEnabled) "On" else "Off"
+        detailMergeButton.text = "Detail merge: $state"
+        detailMergeButton.setTextColor(if (multiFrameDetailEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+        detailMergeButton.setTypeface(null, if (multiFrameDetailEnabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+        detailMergeButton.contentDescription = "Two-frame deblur and detail merge, $state"
+    }
+
     private fun updateModeButtons() {
         applyControlSizing()
         modeButtons.forEach { (mode, button) ->
@@ -876,6 +957,7 @@ class MainActivity : ComponentActivity() {
         val focusYAtCapture = focusY
         val facingAtCapture = lensFacing
         val modeAtCapture = activeMode
+        val detailMergeAtCapture = multiFrameDetailEnabled
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
@@ -898,13 +980,50 @@ class MainActivity : ComponentActivity() {
                     }
                     photoProcessingExecutor.execute {
                         try {
-                            val merged = NightBurstMerger.merge(frames)
+                            val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                                 refreshShutterAvailability()
                                 message("Night photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                                updateStatus()
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        if (detailMergeAtCapture) {
+            setStatusMessage("Capturing detail frames…")
+            captureNightFrames(capture, mutableListOf(), 0) { frames ->
+                if (frames == null) {
+                    runOnUiThread {
+                        isBusy = false
+                        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                        refreshShutterAvailability()
+                        message("Detail capture failed; try again with the phone steadier.")
+                        updateStatus()
+                    }
+                } else {
+                    runOnUiThread {
+                        isBusy = false
+                        refreshShutterAvailability()
+                        setStatusMessage("Merging detail frames…")
+                        showQueueStatus()
+                    }
+                    photoProcessingExecutor.execute {
+                        try {
+                            val merged = NightBurstMerger.mergeDetail(frames)
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                                refreshShutterAvailability()
+                                message("Detail merge failed: ${e.localizedMessage ?: "unknown error"}")
                                 updateStatus()
                             }
                         }
@@ -1116,6 +1235,7 @@ class MainActivity : ComponentActivity() {
                     editControls.visibility = View.VISIBLE
                     strengthRow.visibility = View.VISIBLE
                     exposureRow.visibility = View.GONE
+                    detailMergeButton.visibility = View.GONE
                     renderImported(upright)
                 }
             } catch (e: Exception) { runOnUiThread { message("Could not open photo: ${e.localizedMessage ?: "unsupported file"}") } }
