@@ -369,8 +369,9 @@ class MainActivity : ComponentActivity() {
 
     private fun applyCameraControlLayout(landscape: Boolean) {
         if (!::zoomRow.isInitialized || !::bottomPanel.isInitialized) return
+        zoomRow.setVertical(landscape)
         zoomRow.layoutParams = if (landscape) {
-            FrameLayout.LayoutParams(dp(280), dp(40), Gravity.START or Gravity.CENTER_VERTICAL).apply {
+            FrameLayout.LayoutParams(dp(48), dp(250), Gravity.START or Gravity.CENTER_VERTICAL).apply {
                 marginStart = dp(12)
             }
         } else {
