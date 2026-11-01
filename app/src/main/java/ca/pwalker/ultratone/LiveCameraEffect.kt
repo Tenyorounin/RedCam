@@ -20,6 +20,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private var mode = ReferenceRenderer.Mode.DAY
     private var focusX = 0.5f
     private var focusY = 0.5f
+    private var hasFreshDepthGuide = false
 
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
@@ -37,6 +38,10 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     }
 
     fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float) {
+        if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
+            // Never apply a depth map from the scene that was visible before this mode switch.
+            hasFreshDepthGuide = false
+        }
         this.mode = mode
         shader.setIntUniform("mode", when (mode) {
             ReferenceRenderer.Mode.DAY -> 0
@@ -46,7 +51,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))
         shader.setFloatUniform("zoomRatio", zoom.coerceAtLeast(1f))
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && depthBitmap != null) 1 else 0)
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide) 1 else 0)
         updateSize()
         // Re-attach after changing RuntimeShader uniforms so PreviewView's
         // hardware layer redraws immediately (not on a later camera rebind).
@@ -71,7 +76,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         depthBitmap = bitmap
         val input = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         shader.setInputShader("depthGuide", input)
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP) 1 else 0)
+        hasFreshDepthGuide = true
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide) 1 else 0)
         updateSize()
         if (old != null && old !== bitmap) {
             mainHandler.postDelayed({ if (old !== depthBitmap && !old.isRecycled) old.recycle() }, 2_000L)
