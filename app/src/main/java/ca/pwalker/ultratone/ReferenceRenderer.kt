@@ -1,202 +1,181 @@
 package ca.pwalker.ultratone
 
 import android.graphics.Bitmap
+import android.graphics.Color
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * An original, adjustable rendering profile guided by published Xiaomi 17 Ultra
- * comparison samples. It does not contain Xiaomi or Leica code or camera data.
+ * Device-independent Leica M9-inspired rendering applied to the camera JPEG.
+ * This is an original adaptive grade; it does not reproduce the M9 sensor, lens,
+ * demosaicing, or Leica's proprietary JPEG pipeline.
  */
 object ReferenceRenderer {
     enum class Mode { DAY, NIGHT, PORTRAIT }
+    enum class Finish { COLOUR, BLACK_AND_WHITE }
 
-    fun render(source: Bitmap, strength: Float, mode: Mode = Mode.DAY, zoomRatio: Float = 1f): Bitmap {
+    fun render(
+        source: Bitmap,
+        strength: Float,
+        mode: Mode = Mode.DAY,
+        zoomRatio: Float = 1f,
+        finish: Finish = Finish.COLOUR
+    ): Bitmap {
         val amount = strength.coerceIn(0f, 1f)
-        val out = source.copy(Bitmap.Config.ARGB_8888, true)
-        val width = out.width
+        val width = source.width
+        val height = source.height
         val row = IntArray(width)
+        val histogram = IntArray(256)
+        var saturationTotal = 0.0
+        var samples = 0L
+        val sampleStep = max(1, max(width, height) / 512)
+        val sampleRow = IntArray(width)
+
+        // Measure the actual scene before choosing curve strength. This keeps a
+        // low-contrast scene from looking flat while avoiding extra punch in a
+        // high-contrast night or backlit frame.
+        for (y in 0 until height step sampleStep) {
+            source.getPixels(sampleRow, 0, width, 0, y, width, 1)
+            for (x in 0 until width step sampleStep) {
+                val c = sampleRow[x]
+                val r = Color.red(c) / 255f
+                val g = Color.green(c) / 255f
+                val b = Color.blue(c) / 255f
+                val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                histogram[(luma * 255f).toInt().coerceIn(0, 255)]++
+                val maximum = max(r, max(g, b))
+                val minimum = min(r, min(g, b))
+                saturationTotal += if (maximum <= 0.001f) 0.0 else (maximum - minimum) / maximum
+                samples++
+            }
+        }
+        val p10 = percentile(histogram, samples, 0.10f) / 255f
+        val median = percentile(histogram, samples, 0.50f) / 255f
+        val p90 = percentile(histogram, samples, 0.90f) / 255f
+        val range = (p90 - p10).coerceIn(0.15f, 0.95f)
+        val sceneContrast = (1.10f + (0.58f - range) * 0.10f).coerceIn(1.04f, 1.17f)
+        val keyBias = ((0.46f - median) * 0.08f).coerceIn(-0.025f, 0.025f)
+        val meanSaturation = if (samples == 0L) 0f else (saturationTotal / samples).toFloat()
+        val sceneSaturation = (1.12f - max(0f, meanSaturation - 0.35f) * 0.30f).coerceIn(1.00f, 1.12f)
+        val zoomDetail = ((zoomRatio - 1f) / 4f).coerceIn(0f, 1f)
+        val detailAmount = when (mode) {
+            Mode.DAY -> 0.035f + zoomDetail * 0.035f
+            Mode.NIGHT -> 0.018f + zoomDetail * 0.02f
+            Mode.PORTRAIT -> 0.022f + zoomDetail * 0.025f
+        } * amount
+
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val above = IntArray(width)
         val below = IntArray(width)
-        val statsRow = IntArray(width)
-
-        var lumaSum = 0.0
-        var saturationSum = 0.0
-        var redSum = 0.0
-        var greenSum = 0.0
-        var blueSum = 0.0
-        val pixelCount = source.width.toLong() * source.height.toLong()
-        for (y in 0 until source.height) {
-            source.getPixels(statsRow, 0, width, 0, y, width, 1)
-            for (color in statsRow) {
-                val r = (color shr 16 and 0xff) / 255f
-                val g = (color shr 8 and 0xff) / 255f
-                val b = (color and 0xff) / 255f
-                lumaSum += 0.2126f * r + 0.7152f * g + 0.0722f * b
-                saturationSum += max(r, max(g, b)) - min(r, min(g, b))
-                redSum += r
-                greenSum += g
-                blueSum += b
-            }
-        }
-        val meanLuma = (lumaSum / pixelCount).toFloat()
-        val meanSaturation = (saturationSum / pixelCount).toFloat()
-        val meanRed = (redSum / pixelCount).toFloat()
-        val meanGreen = (greenSum / pixelCount).toFloat()
-        val meanBlue = (blueSum / pixelCount).toFloat()
-        val greenDominance = meanGreen - (meanRed + meanBlue) * 0.5f
-        val redBlueDifference = meanRed - meanBlue
-        val greenHeavy = greenDominance > 0.03f
-        val coolSubject = meanLuma in 0.40f..0.48f && meanSaturation > 0.13f &&
-            abs(redBlueDifference) < 0.04f && greenDominance <= 0.03f
-        val warmDetail = meanLuma in 0.38f..0.53f && meanSaturation in 0.12f..0.20f &&
-            redBlueDifference > 0.05f
-        val portraitLike = meanLuma in 0.45f..0.70f && meanSaturation in 0.20f..0.30f &&
-            redBlueDifference > 0.08f && greenDominance < 0.03f
-        val colourInterior = meanLuma in 0.36f..0.50f && meanSaturation > 0.13f &&
-            (redBlueDifference < -0.05f || redBlueDifference > 0.08f && meanSaturation > 0.20f)
-        val exposureBias = when (mode) {
-            Mode.DAY -> when {
-                meanLuma < 0.33f -> -0.04f
-                greenHeavy -> if (greenDominance > 0.07f) -0.14f else -0.18f
-                portraitLike -> if (meanLuma > 0.52f) 0.065f else 0.08f
-                warmDetail -> -0.18f
-                coolSubject -> -0.15f
-                colourInterior -> 0.08f
-                meanLuma in 0.45f..0.50f && meanSaturation < 0.08f -> 0.015f
-                meanLuma > 0.65f && meanSaturation > 0.28f -> 0.04f
-                else -> 0f
-            }
-            Mode.NIGHT -> 0f
-            Mode.PORTRAIT -> 0.08f
-        } * amount
-        val saturationAtFullStrength = when (mode) {
-            Mode.DAY -> when {
-                meanLuma < 0.33f && meanSaturation < 0.08f -> 0.867f
-                meanLuma < 0.33f -> 1.00f
-                greenHeavy && greenDominance > 0.07f -> 0.75f
-                greenHeavy -> 0.90f
-                warmDetail -> 0.90f
-                portraitLike -> if (meanLuma > 0.52f) 0.90f else 1.00f
-                coolSubject -> 1.25f
-                colourInterior && redBlueDifference < -0.05f -> 0.867f
-                colourInterior -> 0.933f
-                meanLuma in 0.45f..0.50f && meanSaturation < 0.08f -> 0.933f
-                meanLuma > 0.65f && meanSaturation > 0.28f -> 1.267f
-                else -> 0.933f
-            }
-            Mode.NIGHT -> 0.96f
-            Mode.PORTRAIT -> if (meanLuma > 0.52f && meanSaturation < 0.24f) 0.90f else 1.00f
-        }
-        val saturation = 1f + (saturationAtFullStrength - 1f) * amount
-        val warmHighlights = mode == Mode.DAY && meanLuma > 0.65f && meanSaturation > 0.28f
-        // Separate channel gains reproduce the measured white-balance and tint
-        // shifts; a luminance-only curve cannot account for these differences.
-        val (redGainAtFull, greenGainAtFull, blueGainAtFull) = when (mode) {
-            Mode.DAY -> when {
-                greenHeavy && greenDominance > 0.07f -> Triple(0.94f, 0.975f, 0.977f)
-                greenHeavy -> Triple(0.973f, 0.980f, 1.008f)
-                warmDetail -> Triple(0.888f, 1.000f, 0.975f)
-                coolSubject -> Triple(0.744f, 1.020f, 1.092f)
-                portraitLike -> Triple(0.975f, 1.013f, 1.000f)
-                colourInterior -> Triple(0.973f, 1.013f, 1.000f)
-                else -> Triple(1f, 1f, 1f)
-            }
-            Mode.NIGHT -> Triple(1f, 1f, 1f)
-            Mode.PORTRAIT -> if (portraitLike) Triple(0.975f, 1.013f, 1.000f)
-                else Triple(0.985f, 1.005f, 1.000f)
-        }
-        val redGain = 1f + (redGainAtFull - 1f) * amount
-        val greenGain = 1f + (greenGainAtFull - 1f) * amount
-        val blueGain = 1f + (blueGainAtFull - 1f) * amount
-        val contrast = when (mode) {
-            Mode.DAY -> 1f + (if (greenHeavy || warmDetail) 0.10f else 0.07f) * amount
-            Mode.NIGHT -> 1f + 0.035f * amount
-            Mode.PORTRAIT -> 1f + 0.045f * amount
-        }
-        val blackLift = when (mode) {
-            Mode.DAY -> 0.006f * amount
-            Mode.NIGHT -> 0.012f * amount
-            Mode.PORTRAIT -> 0.008f * amount
+        val hsv = FloatArray(3)
+        val whiteBalanceScale = when (mode) {
+            Mode.NIGHT -> 0.8f
+            else -> 1f
         }
 
-        // Calibrated against seven labeled comparison panels and six matched
-        // Pixel/X17 Ultra pairs. Exposure and colour shifts vary by scene so
-        // portrait, foliage, detail, and night references do not share one EV.
-        val shoulderStart = 0.92f
-        val shoulderScale = 1f - (if (mode == Mode.NIGHT) 0.48f else 0.40f) * amount
-        val zoomEnhancement = ((zoomRatio - 1f) / 4f).coerceIn(0f, 1f)
-        val detailStrength = when (mode) {
-            Mode.DAY -> (if (greenHeavy || warmDetail) 0.05f else 0.03f) + zoomEnhancement * 0.07f
-            Mode.NIGHT -> 0.022f + zoomEnhancement * 0.045f
-            Mode.PORTRAIT -> 0.025f + zoomEnhancement * 0.045f
-        } * amount
-
-        for (y in 0 until out.height) {
+        for (y in 0 until height) {
             source.getPixels(row, 0, width, 0, y, width, 1)
             source.getPixels(above, 0, width, 0, max(0, y - 1), width, 1)
-            source.getPixels(below, 0, width, 0, min(source.height - 1, y + 1), width, 1)
+            source.getPixels(below, 0, width, 0, min(height - 1, y + 1), width, 1)
             for (x in 0 until width) {
                 val c = row[x]
-                val a = c ushr 24
-                val r = (c shr 16 and 0xff) / 255f
-                val g = (c shr 8 and 0xff) / 255f
-                val b = (c and 0xff) / 255f
+                val alpha = Color.alpha(c)
+                val r = Color.red(c) / 255f
+                val g = Color.green(c) / 255f
+                val b = Color.blue(c) / 255f
                 val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                val left = lumaOf(row[if (x == 0) x else x - 1])
-                val right = lumaOf(row[if (x == width - 1) x else x + 1])
+                val left = lumaOf(row[max(0, x - 1)])
+                val right = lumaOf(row[min(width - 1, x + 1)])
                 val top = lumaOf(above[x])
                 val bottom = lumaOf(below[x])
                 val localDetail = luma - (left + right + top + bottom) * 0.25f
-                val detailFactor = when (mode) {
-                    Mode.DAY -> if (abs(localDetail) < 0.035f) 0.5f else 1.1f
-                    // Avoid accentuating high-ISO grain when no multi-frame night
-                    // extension is available on the device.
-                    Mode.NIGHT -> if (abs(localDetail) < 0.035f) 0.25f else 0.55f
-                    // Keep portrait texture restrained; a separate ML mask handles
-                    // background blur after this colour rendering pass.
-                    Mode.PORTRAIT -> if (abs(localDetail) < 0.035f) 0.35f else 0.8f
+
+                val bw = finish == Finish.BLACK_AND_WHITE
+                // M9-like contrast with a soft toe: preserve form in dark tones,
+                // while compressing only the upper end of the mobile JPEG range.
+                val contrast = sceneContrast + if (bw) 0.09f else 0f
+                var target = (luma - 0.46f) * contrast + 0.46f + keyBias
+                val toe = smoothstep(((0.30f - target) / 0.30f).coerceIn(0f, 1f))
+                target += 0.014f * toe
+                val shoulder = smoothstep(((target - 0.72f) / 0.28f).coerceIn(0f, 1f))
+                target -= (if (bw) 0.12f else 0.16f) * shoulder * (target - 0.72f).coerceAtLeast(0f)
+                target += localDetail * if (abs(localDetail) < 0.025f) detailAmount * 0.30f else detailAmount
+                target = (luma + (target - luma) * amount).coerceIn(0f, 1f)
+
+                if (bw) {
+                    // A green-weighted monochrome mix retains leaf and skin
+                    // texture; the separate contrast curve gives a print-like
+                    // tonal rendering instead of simple desaturation.
+                    val mono = ((0.28f * r + 0.62f * g + 0.10f * b - 0.46f) * (contrast + 0.05f) + 0.46f + keyBias)
+                        .coerceIn(0f, 1f)
+                    val value = luma + (mono - luma) * amount
+                    val grey = toByte(value)
+                    row[x] = Color.argb(alpha, grey, grey, grey)
+                    continue
                 }
 
-                var target = (luma - 0.46f) * contrast + 0.46f + exposureBias
-                target += localDetail * detailFactor * detailStrength
-                if (mode == Mode.NIGHT) {
-                    // Lift only the lower tones and roll off near-black noise.
-                    val shadowWeight = ((0.48f - luma) / 0.48f).coerceIn(0f, 1f)
-                    target += 0.11f * amount * shadowWeight * (1f - target)
-                }
-                if (target > shoulderStart) {
-                    target = shoulderStart + (target - shoulderStart) * shoulderScale
-                }
-                target = (target + blackLift * (1f - target)).coerceIn(0f, 1f)
-                var nr = target + (r - luma) * saturation
-                var ng = target + (g - luma) * saturation
-                var nb = target + (b - luma) * saturation
-                if (warmHighlights) {
-                    val warm = 0.22f * amount * max(0f, (luma - 0.35f) / 0.65f)
-                    nr += warm * 0.12f
-                    ng += warm * 0.06f
-                    nb -= warm
-                }
-                nr *= redGain
-                ng *= greenGain
-                nb *= blueGain
+                Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv)
+                val hue = hsv[0]
+                val saturation = hsv[1]
+                val value = hsv[2]
+                val hueShift = m9HueShift(hue)
+                val greenWeight = gaussianHue(hue, 118f, 38f)
+                val saturationBoost = (sceneSaturation - 1f) * smoothstep(((saturation - 0.16f) / 0.62f).coerceIn(0f, 1f))
+                val adjustedSaturation = (saturation + saturationBoost - 0.055f * greenWeight * (1f - smoothstep(((value - 0.25f) / 0.55f).coerceIn(0f, 1f))))
+                    .coerceIn(0f, 1f)
+                hsv[0] = (hue + hueShift * amount).let { (it % 360f + 360f) % 360f }
+                hsv[1] = saturation + (adjustedSaturation - saturation) * amount
+                hsv[2] = 1f
+                val fullColor = Color.HSVToColor(hsv)
+                val fullLuma = lumaOf(fullColor).coerceAtLeast(0.02f)
+                val targetValue = (target / fullLuma).coerceIn(0f, 1f)
+                hsv[2] = value + (targetValue - value) * amount
 
-                row[x] = (a shl 24) or
-                    (toByte(nr) shl 16) or
-                    (toByte(ng) shl 8) or
-                    toByte(nb)
+                // Mild warm highlights and cooler shadows imitate the M9's
+                // film-like colour separation without applying a fixed LUT tint.
+                val shadowWeight = 1f - smoothstep(((luma - 0.12f) / 0.48f).coerceIn(0f, 1f))
+                val highlightWeight = smoothstep(((luma - 0.56f) / 0.40f).coerceIn(0f, 1f))
+                val graded = Color.HSVToColor(hsv)
+                var nr = Color.red(graded) / 255f
+                var ng = Color.green(graded) / 255f
+                var nb = Color.blue(graded) / 255f
+                nr += (0.006f * highlightWeight - 0.003f * shadowWeight) * amount * whiteBalanceScale
+                ng += (0.001f * highlightWeight) * amount * whiteBalanceScale
+                nb += (-0.005f * highlightWeight + 0.004f * shadowWeight) * amount * whiteBalanceScale
+                row[x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
             }
             out.setPixels(row, 0, width, 0, y, width, 1)
         }
         return out
     }
 
-    private fun lumaOf(color: Int): Float =
-        0.2126f * ((color shr 16 and 0xff) / 255f) +
-            0.7152f * ((color shr 8 and 0xff) / 255f) +
-            0.0722f * ((color and 0xff) / 255f)
+    private fun percentile(histogram: IntArray, total: Long, fraction: Float): Int {
+        val threshold = (total * fraction).toLong()
+        var accumulated = 0L
+        for (i in histogram.indices) {
+            accumulated += histogram[i]
+            if (accumulated >= threshold) return i
+        }
+        return 255
+    }
 
-    private fun toByte(value: Float): Int = (min(1f, max(0f, value)) * 255f + 0.5f).toInt()
+    private fun m9HueShift(hue: Float): Float =
+        gaussianHue(hue, 4f, 20f) * 4.5f +
+            gaussianHue(hue, 30f, 17f) * 4.0f +
+            gaussianHue(hue, 59f, 19f) * 5.0f +
+            gaussianHue(hue, 188f, 26f) * 10.0f
+
+    private fun gaussianHue(hue: Float, center: Float, width: Float): Float {
+        val direct = abs(hue - center)
+        val distance = min(direct, 360f - direct)
+        return exp(-(distance * distance) / (2f * width * width))
+    }
+
+    private fun lumaOf(color: Int): Float =
+        0.2126f * Color.red(color) / 255f + 0.7152f * Color.green(color) / 255f + 0.0722f * Color.blue(color) / 255f
+
+    private fun smoothstep(value: Float): Float = value * value * (3f - 2f * value)
+    private fun toByte(value: Float): Int = (value.coerceIn(0f, 1f) * 255f + 0.5f).toInt()
 }

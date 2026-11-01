@@ -80,17 +80,20 @@ class MainActivity : ComponentActivity() {
     @Volatile private var styleStrength = 0.75f
     private var currentZoomRatio = 1f
     @Volatile private var activeMode = ReferenceRenderer.Mode.DAY
+    @Volatile private var activeFinish = ReferenceRenderer.Finish.COLOUR
     @Volatile private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var isBusy = false
     private var cameraModeNote = ""
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
+    private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
     private val zoomButtons = mutableMapOf<Float, TextView>()
     private lateinit var flashButton: TextView
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
     private lateinit var zoomRow: LinearLayout
     private lateinit var modeRow: LinearLayout
+    private lateinit var finishRow: LinearLayout
     private lateinit var captureControls: LinearLayout
     private lateinit var editControls: LinearLayout
 
@@ -192,15 +195,30 @@ class MainActivity : ComponentActivity() {
         }
         bottom.addView(modeRow)
 
+        finishRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, dp(6))
+        }
+        ReferenceRenderer.Finish.values().forEach { finish ->
+            val label = if (finish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"
+            val item = pill(label) { selectFinish(finish) }
+            finishButtons[finish] = item
+            finishRow.addView(item, LinearLayout.LayoutParams(dp(112), dp(36)).apply {
+                marginStart = dp(4); marginEnd = dp(4)
+            })
+        }
+        bottom.addView(finishRow)
+
         strengthRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             visibility = View.GONE
         }
-        strengthRow.addView(TextView(this).apply { text = "Look"; textSize = 12f; setTextColor(0xffd4d4d8.toInt()) })
+        strengthRow.addView(TextView(this).apply { text = "M9 Look"; textSize = 12f; setTextColor(0xffd4d4d8.toInt()) })
         strength = SeekBar(this).apply {
             max = 100
-            progress = 75
+            progress = 100
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
                     styleStrength = value / 100f
@@ -267,7 +285,7 @@ class MainActivity : ComponentActivity() {
         captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(52), dp(52)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         shutterButton = ImageButton(this).apply {
-            contentDescription = "Take photo and apply UltraTone processing"
+            contentDescription = "Take photo and apply the Leica M9-inspired ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} rendering"
             background = rounded(Color.WHITE, 50)
             setImageDrawable(null)
             setPadding(dp(6), dp(6), dp(6), dp(6))
@@ -296,6 +314,7 @@ class MainActivity : ComponentActivity() {
         overlay.addView(bottom)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         updateModeButtons()
+        updateFinishButtons()
         attachPreviewGestures()
         setContentView(root)
     }
@@ -508,7 +527,7 @@ class MainActivity : ComponentActivity() {
                 }
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
-            val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio)
+            val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio, activeFinish)
             styled = colorized
             oriented.recycle()
             var output: Bitmap = colorized
@@ -582,6 +601,22 @@ class MainActivity : ComponentActivity() {
         if (previewView.visibility == View.VISIBLE && cameraProvider != null) bindCamera()
     }
 
+    private fun selectFinish(finish: ReferenceRenderer.Finish) {
+        activeFinish = finish
+        updateFinishButtons()
+        sourceBitmap?.let { renderImported(it) }
+        updateStatus()
+    }
+
+    private fun updateFinishButtons() {
+        finishButtons.forEach { (finish, button) ->
+            val selected = finish == activeFinish
+            button.setTextColor(if (selected) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+            button.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            button.alpha = if (selected) 1f else 0.70f
+        }
+    }
+
     private fun updateModeButtons() {
         modeButtons.forEach { (mode, button) ->
             val selected = mode == activeMode
@@ -604,6 +639,7 @@ class MainActivity : ComponentActivity() {
         val facingAtCapture = lensFacing
         val modeAtCapture = activeMode
         val strengthAtCapture = styleStrength
+        val finishAtCapture = activeFinish
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
@@ -613,7 +649,7 @@ class MainActivity : ComponentActivity() {
                         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
                             ?: error("Could not decode captured image")
                         val upright = orient(bitmap, file)
-                        val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom)
+                        val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
                         val focus = mapFocusToFrame(
                             focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
                             upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
@@ -681,6 +717,7 @@ class MainActivity : ComponentActivity() {
                     imageView.visibility = View.VISIBLE
                     zoomRow.visibility = View.GONE
                     modeRow.visibility = View.VISIBLE
+                    finishRow.visibility = View.VISIBLE
                     captureControls.visibility = View.GONE
                     editControls.visibility = View.VISIBLE
                     strengthRow.visibility = View.VISIBLE
@@ -695,7 +732,7 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         cameraExecutor.execute {
             try {
-                val styled = ReferenceRenderer.render(source, styleStrength, mode)
+                val styled = ReferenceRenderer.render(source, styleStrength, mode, finish = activeFinish)
                 val focus = mapFocusToFrame(
                     focusX, focusY, processedPreviewView.width, processedPreviewView.height,
                     source.width, source.height, false
@@ -782,7 +819,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateStatus() {
-        if (!isBusy) status.text = "$cameraModeNote · ${strength.progress}% look"
+        if (!isBusy) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "M9 Colour" else "B&W"} · ${strength.progress}%"
     }
 
     private fun pill(label: String, action: () -> Unit): TextView = TextView(this).apply {
