@@ -161,10 +161,8 @@ class MainActivity : ComponentActivity() {
         previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
         updateLiveLook()
 
-        val overlay = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(8), dp(12), dp(8))
-        }
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val overlay = FrameLayout(this)
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -184,15 +182,19 @@ class MainActivity : ComponentActivity() {
             marginStart = dp(12); marginEnd = dp(12)
         })
         top.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(42), dp(36)))
-        overlay.addView(top)
+        overlay.addView(top, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
         zoomRow = LensZoomControl(this).apply {
             onZoomChanged = ::selectZoom
             contentDescription = "Camera zoom slider. Yellow marks show lens changes."
         }
-        overlay.addView(zoomRow, LinearLayout.LayoutParams(-1, dp(38)).apply {
-            topMargin = dp(8)
-        })
-        overlay.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        val zoomLayout = if (landscape) {
+            FrameLayout.LayoutParams(dp(280), dp(40), Gravity.START or Gravity.CENTER_VERTICAL).apply {
+                marginStart = dp(12)
+            }
+        } else {
+            FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP).apply { topMargin = dp(52) }
+        }
+        overlay.addView(zoomRow, zoomLayout)
 
         bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -347,11 +349,20 @@ class MainActivity : ComponentActivity() {
         editControls.addView(pill("Save") { savePhoto() }, LinearLayout.LayoutParams(0, dp(44), 1f))
         editControls.addView(pill("Choose another") { choosePhoto.launch("image/*") }, LinearLayout.LayoutParams(0, dp(44), 1f))
         bottom.addView(editControls)
-        overlay.addView(bottom)
+        val bottomLayout = if (landscape) {
+            FrameLayout.LayoutParams(dp(292), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+                marginEnd = dp(12)
+            }
+        } else {
+            FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(12)
+            }
+        }
+        overlay.addView(bottom, bottomLayout)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            overlay.setPadding(bars.left + dp(12), bars.top + dp(8), bars.right + dp(12), bars.bottom + dp(8))
+            overlay.setPadding(bars.left, bars.top + dp(8), bars.right, bars.bottom + dp(8))
             insets
         }
         updateModeButtons()
