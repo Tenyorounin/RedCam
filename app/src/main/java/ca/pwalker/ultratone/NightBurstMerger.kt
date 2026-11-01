@@ -3,79 +3,82 @@ package ca.pwalker.ultratone
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import androidx.exifinterface.media.ExifInterface
-import java.io.File
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /** A conservative two-frame fallback for phones without a CameraX Night extension. */
 object NightBurstMerger {
-    fun merge(files: List<File>): Bitmap {
-        require(files.size == 2) { "Night fallback expects two captures" }
-        val first = decodeUpright(files[0])
+    data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
+
+    fun merge(frames: List<Frame>): Bitmap {
+        require(frames.size == 2) { "Night fallback expects two captures" }
+        val first = decodeUpright(frames[0])
         val base = first.copy(Bitmap.Config.ARGB_8888, true) ?: error("Could not prepare night merge")
-        if (base !== first) first.recycle()
+        first.recycle()
         val width = base.width
         val height = base.height
         val reference = IntArray(width * height)
         base.getPixels(reference, 0, width, 0, 0, width, height)
 
-        val second = decodeUpright(files[1])
+        val second = decodeUpright(frames[1])
         val aligned = if (second.width != width || second.height != height) {
             Bitmap.createScaledBitmap(second, width, height, true).also { if (it !== second) second.recycle() }
         } else second
-        val (dx, dy) = estimateShift(reference, aligned, width, height)
-        val secondRow = IntArray(width)
-        val outputRow = IntArray(width)
-        for (y in 0 until height) {
-            base.getPixels(outputRow, 0, width, 0, y, width, 1)
-            val sourceY = y + dy
-            if (sourceY in 0 until height) {
-                aligned.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
-                for (x in 0 until width) {
-                    val sourceX = x + dx
-                    if (sourceX !in 0 until width) continue
-                    val original = reference[y * width + x]
-                    val candidate = secondRow[sourceX]
-                    // Reject areas that changed substantially between exposures
-                    // (moving subjects, foliage, traffic) to avoid obvious ghosts.
-                    if (isStable(original, candidate)) {
-                        val current = outputRow[x]
-                        outputRow[x] = Color.rgb(
-                            (Color.red(current) + Color.red(candidate)) / 2,
-                            (Color.green(current) + Color.green(candidate)) / 2,
-                            (Color.blue(current) + Color.blue(candidate)) / 2
-                        )
+        try {
+            val (dx, dy) = estimateShift(reference, aligned, width, height)
+            val secondRow = IntArray(width)
+            val outputRow = IntArray(width)
+            for (y in 0 until height) {
+                base.getPixels(outputRow, 0, width, 0, y, width, 1)
+                val sourceY = y + dy
+                if (sourceY in 0 until height) {
+                    aligned.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
+                    for (x in 0 until width) {
+                        val sourceX = x + dx
+                        if (sourceX !in 0 until width) continue
+                        val original = reference[y * width + x]
+                        val candidate = secondRow[sourceX]
+                        // Reject areas that changed substantially between exposures
+                        // (moving subjects, foliage, traffic) to avoid obvious ghosts.
+                        if (isStable(original, candidate)) {
+                            val current = outputRow[x]
+                            outputRow[x] = Color.rgb(
+                                (Color.red(current) + Color.red(candidate)) / 2,
+                                (Color.green(current) + Color.green(candidate)) / 2,
+                                (Color.blue(current) + Color.blue(candidate)) / 2
+                            )
+                        }
                     }
                 }
+                base.setPixels(outputRow, 0, width, 0, y, width, 1)
             }
-            base.setPixels(outputRow, 0, width, 0, y, width, 1)
+            return base
+        } catch (e: Exception) {
+            base.recycle()
+            throw e
+        } finally {
+            aligned.recycle()
         }
-        aligned.recycle()
-        return base
     }
 
-    private fun decodeUpright(file: File): Bitmap {
+    private fun decodeUpright(frame: Frame): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, bounds)
         var sample = 1
         while (bounds.outWidth.toLong() / sample * (bounds.outHeight.toLong() / sample) > 16_000_000L) {
             sample *= 2
         }
-        val decoded = BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply {
+        val decoded = BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, BitmapFactory.Options().apply {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }) ?: error("Could not decode night capture")
-        return try {
-            val rotation = ExifInterface(file).rotationDegrees
-            if (rotation == 0) decoded else Bitmap.createBitmap(
-                decoded, 0, 0, decoded.width, decoded.height,
-                android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }, true
-            ).also { if (it !== decoded) decoded.recycle() }
-        } catch (_: Exception) {
-            decoded
-        }
+        val rotation = ((frame.rotationDegrees % 360) + 360) % 360
+        if (rotation == 0) return decoded
+        return Bitmap.createBitmap(
+            decoded, 0, 0, decoded.width, decoded.height,
+            android.graphics.Matrix().apply { postRotate(rotation.toFloat()) }, true
+        ).also { if (it !== decoded) decoded.recycle() }
     }
 
     private fun estimateShift(reference: IntArray, frame: Bitmap, width: Int, height: Int): Pair<Int, Int> {
