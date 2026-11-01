@@ -738,8 +738,8 @@ class MainActivity : ComponentActivity() {
                 rendered.recycle()
             }
         } catch (e: Exception) {
-            style?.takeIf { it !== final }?.recycle()
             final?.takeIf { it !== style }?.recycle()
+            style?.recycle()
             runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
         } finally {
             upright.recycle()
