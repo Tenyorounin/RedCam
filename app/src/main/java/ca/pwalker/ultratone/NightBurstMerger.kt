@@ -2,76 +2,82 @@ package ca.pwalker.ultratone
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Color
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 
-/** A conservative two-frame fallback for phones without a CameraX Night extension. */
+/**
+ * A conservative, two-frame fallback for phones without a CameraX Night extension.
+ *
+ * Work stays on the photo-processing executor. We only blend pixels that remain
+ * close between frames, so moving details fall back to the first exposure.
+ */
 object NightBurstMerger {
+    private const val MAX_DECODE_PIXELS = 16_000_000L
+    private const val ALIGNMENT_SCALE = 16
+    private const val MAX_LUMA_DELTA = 24
+    private const val MAX_RGB_DELTA = 72
+
     data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
 
     fun merge(frames: List<Frame>): Bitmap {
         require(frames.size == 2) { "Night fallback expects two captures" }
-        val first = decodeUpright(frames[0])
-        val base = first.copy(Bitmap.Config.ARGB_8888, true) ?: error("Could not prepare night merge")
-        first.recycle()
-        val width = base.width
-        val height = base.height
-        val reference = IntArray(width * height)
-        base.getPixels(reference, 0, width, 0, 0, width, height)
-
-        val second = decodeUpright(frames[1])
-        val aligned = if (second.width != width || second.height != height) {
-            Bitmap.createScaledBitmap(second, width, height, true).also { if (it !== second) second.recycle() }
-        } else second
+        // Decode the reference mutable so we can reuse it directly. This avoids
+        // a full-resolution bitmap copy on the capture-processing path.
+        val base = decodeUpright(frames[0], mutable = true)
+        var aligned: Bitmap? = null
         try {
+            val width = base.width
+            val height = base.height
+            val reference = IntArray(width * height)
+            base.getPixels(reference, 0, width, 0, 0, width, height)
+
+            val second = decodeUpright(frames[1], mutable = false)
+            aligned = if (second.width != width || second.height != height) {
+                Bitmap.createScaledBitmap(second, width, height, true).also {
+                    if (it !== second) second.recycle()
+                }
+            } else second
+
             val (dx, dy) = estimateShift(reference, aligned, width, height)
             val secondRow = IntArray(width)
-            val outputRow = IntArray(width)
             for (y in 0 until height) {
-                base.getPixels(outputRow, 0, width, 0, y, width, 1)
                 val sourceY = y + dy
-                if (sourceY in 0 until height) {
-                    aligned.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
-                    for (x in 0 until width) {
-                        val sourceX = x + dx
-                        if (sourceX !in 0 until width) continue
-                        val original = reference[y * width + x]
-                        val candidate = secondRow[sourceX]
-                        // Reject areas that changed substantially between exposures
-                        // (moving subjects, foliage, traffic) to avoid obvious ghosts.
-                        if (isStable(original, candidate)) {
-                            val current = outputRow[x]
-                            outputRow[x] = Color.rgb(
-                                (Color.red(current) + Color.red(candidate)) / 2,
-                                (Color.green(current) + Color.green(candidate)) / 2,
-                                (Color.blue(current) + Color.blue(candidate)) / 2
-                            )
-                        }
+                if (sourceY !in 0 until height) continue
+                aligned.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
+                val rowOffset = y * width
+                for (x in 0 until width) {
+                    val sourceX = x + dx
+                    if (sourceX !in 0 until width) continue
+                    val index = rowOffset + x
+                    val original = reference[index]
+                    val candidate = secondRow[sourceX]
+                    if (isStable(original, candidate)) {
+                        reference[index] = averageRgb(original, candidate)
                     }
                 }
-                base.setPixels(outputRow, 0, width, 0, y, width, 1)
             }
+            // One full bitmap write replaces the previous per-row bitmap writes.
+            base.setPixels(reference, 0, width, 0, 0, width, height)
             return base
         } catch (e: Exception) {
             base.recycle()
             throw e
         } finally {
-            aligned.recycle()
+            aligned?.recycle()
         }
     }
 
-    private fun decodeUpright(frame: Frame): Bitmap {
+    private fun decodeUpright(frame: Frame, mutable: Boolean): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, bounds)
         var sample = 1
-        while (bounds.outWidth.toLong() / sample * (bounds.outHeight.toLong() / sample) > 16_000_000L) {
+        while (bounds.outWidth.toLong() / sample * (bounds.outHeight.toLong() / sample) > MAX_DECODE_PIXELS) {
             sample *= 2
         }
         val decoded = BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, BitmapFactory.Options().apply {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
+            inMutable = mutable
         }) ?: error("Could not decode night capture")
         val rotation = ((frame.rotationDegrees % 360) + 360) % 360
         if (rotation == 0) return decoded
@@ -82,7 +88,7 @@ object NightBurstMerger {
     }
 
     private fun estimateShift(reference: IntArray, frame: Bitmap, width: Int, height: Int): Pair<Int, Int> {
-        val scale = 16
+        val scale = ALIGNMENT_SCALE
         val smallWidth = max(1, width / scale)
         val smallHeight = max(1, height / scale)
         val small = Bitmap.createScaledBitmap(frame, smallWidth, smallHeight, true)
@@ -135,10 +141,25 @@ object NightBurstMerger {
         return bestDx to bestDy
     }
 
-    private fun isStable(a: Int, b: Int): Boolean =
-        abs(luma(a) - luma(b)) <= 42 &&
-            (abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))) <= 105
+    private fun isStable(a: Int, b: Int): Boolean {
+        val redA = a ushr 16 and 0xff
+        val greenA = a ushr 8 and 0xff
+        val blueA = a and 0xff
+        val redB = b ushr 16 and 0xff
+        val greenB = b ushr 8 and 0xff
+        val blueB = b and 0xff
+        val lumaDelta = abs(54 * (redA - redB) + 183 * (greenA - greenB) + 19 * (blueA - blueB)) shr 8
+        return lumaDelta <= MAX_LUMA_DELTA &&
+            abs(redA - redB) + abs(greenA - greenB) + abs(blueA - blueB) <= MAX_RGB_DELTA
+    }
+
+    private fun averageRgb(a: Int, b: Int): Int {
+        val red = ((a ushr 16 and 0xff) + (b ushr 16 and 0xff)) ushr 1
+        val green = ((a ushr 8 and 0xff) + (b ushr 8 and 0xff)) ushr 1
+        val blue = ((a and 0xff) + (b and 0xff)) ushr 1
+        return (0xff shl 24) or (red shl 16) or (green shl 8) or blue
+    }
 
     private fun luma(color: Int): Int =
-        (0.2126f * Color.red(color) + 0.7152f * Color.green(color) + 0.0722f * Color.blue(color)).toInt()
+        (54 * (color ushr 16 and 0xff) + 183 * (color ushr 8 and 0xff) + 19 * (color and 0xff)) shr 8
 }
