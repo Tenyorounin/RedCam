@@ -70,8 +70,8 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                 alpha = 205
             }
             private val majorTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0xffffc857.toInt()
-                strokeWidth = dp(3).toFloat()
+                color = 0xffffd052.toInt()
+                strokeWidth = dp(4).toFloat()
                 strokeCap = Paint.Cap.ROUND
             }
             override fun onDraw(canvas: Canvas) {
@@ -79,18 +79,22 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                 val left = slider.left + slider.paddingLeft.toFloat()
                 val right = slider.right - slider.paddingRight.toFloat()
                 val width = right - left
-                if (width <= 0f || maxRatio <= minRatio) return
+                if (width <= 0f) return
                 val centerY = height / 2f
                 // Fine white divisions make the continuous range readable at a glance.
                 for (progress in 0..slider.max step 50) {
                     val x = left + width * progress / slider.max
                     canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
                 }
-                // Lens handoff points are more prominent and reflect this phone's camera.
-                lensSwitchRatios.forEach { ratio ->
+                // 1× is always a reference point; additional major marks follow
+                // the physical-camera switch ratios reported by this device.
+                val majorRatios = (lensSwitchRatios + 1f)
+                    .filter { it.isFinite() && it >= minRatio && it <= maxRatio }
+                    .distinctBy { (it * 100).toInt() }
+                majorRatios.forEach { ratio ->
                     if (ratio < minRatio || ratio > maxRatio) return@forEach
                     val x = left + width * progressAt(ratio) / slider.max
-                    canvas.drawLine(x, centerY - dp(8), x, centerY + dp(8), majorTickPaint)
+                    canvas.drawLine(x, centerY - dp(10), x, centerY + dp(10), majorTickPaint)
                 }
             }
         }.apply {
