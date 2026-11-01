@@ -63,6 +63,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
@@ -76,13 +77,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var exposureLabel: TextView
     private lateinit var detailMergeButton: TextView
     private lateinit var nightEnhancementButton: TextView
+    private lateinit var creativeEffectsRow: LinearLayout
+    private val creativeEffectButtons = mutableMapOf<String, TextView>()
     private lateinit var focusIndicator: View
     private var exposureRange = 0..0
     @Volatile private var multiFrameDetailEnabled = false
     @Volatile private var nightEnhancementEnabled = false
     @Volatile private var infinityFocusEnabled = false
+    @Volatile private var glowEnabled = false
+    @Volatile private var flareEnabled = false
+    @Volatile private var vignetteEnabled = false
     private var infinityFocusSupported = false
     private var manualLensFocusSupported = false
+    private var landscapeFocusDistance: Float? = null
     private var moreMenuExpanded = false
     private val focusIndicatorHandler = Handler(Looper.getMainLooper())
     private val hideFocusIndicator = Runnable {
@@ -153,6 +160,9 @@ class MainActivity : ComponentActivity() {
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
+        glowEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_glow", false)
+        flareEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_flare", false)
+        vignetteEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_vignette", false)
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -361,6 +371,27 @@ class MainActivity : ComponentActivity() {
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         updateNightEnhancementButton()
 
+        creativeEffectsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        listOf("glow", "flare", "vignette").forEach { effect ->
+            val button = pill(effectLabel(effect)) { toggleCreativeEffect(effect) }.apply {
+                textSize = 11f
+                maxLines = 1
+                contentDescription = "${effectLabel(effect)} effect, off"
+            }
+            creativeEffectButtons[effect] = button
+            creativeEffectsRow.addView(button, LinearLayout.LayoutParams(0, dp(30), 1f).apply {
+                marginStart = dp(2); marginEnd = dp(2)
+            })
+        }
+        bottom.addView(creativeEffectsRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        updateCreativeEffectButtons()
+
         captureControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -514,6 +545,7 @@ class MainActivity : ComponentActivity() {
 
     private fun focusOnPreview(source: View, x: Float, y: Float) {
         if (infinityFocusEnabled) return
+        if (activeMode == ReferenceRenderer.Mode.LANDSCAPE && landscapeFocusDistance != null) applyManualLensFocus(null)
         val sourceLocation = IntArray(2)
         val previewLocation = IntArray(2)
         source.getLocationOnScreen(sourceLocation)
@@ -556,6 +588,7 @@ class MainActivity : ComponentActivity() {
     private fun updateInfinityFocusSupport(cameraInfo: CameraInfo?) {
         infinityFocusSupported = false
         manualLensFocusSupported = false
+        landscapeFocusDistance = null
         try {
             val info = cameraInfo ?: throw IllegalStateException("No active camera")
             val camera2 = Camera2CameraInfo.from(info)
@@ -565,6 +598,22 @@ class MainActivity : ComponentActivity() {
                 capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
             // A fixed-focus lens is already at its fixed focal plane and has no AF to override.
             infinityFocusSupported = minimumDistance == 0f || manualLensFocusSupported
+
+            if (manualLensFocusSupported) {
+                val focalLength = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    ?.minOrNull()
+                val aperture = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)
+                    ?.minOrNull()
+                val sensorSize = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                if (focalLength != null && aperture != null && sensorSize != null && minimumDistance != null) {
+                    val sensorDiagonal = sqrt(sensorSize.width * sensorSize.width + sensorSize.height * sensorSize.height)
+                    val circleOfConfusion = sensorDiagonal / 1500f
+                    val hyperfocalMm = focalLength * focalLength / (aperture * circleOfConfusion) + focalLength
+                    if (hyperfocalMm > 0f) {
+                        landscapeFocusDistance = (1000f / hyperfocalMm).coerceIn(0f, minimumDistance)
+                    }
+                }
+            }
         } catch (_: Exception) { }
         if (!infinityFocusSupported && infinityFocusEnabled) {
             infinityFocusEnabled = false
@@ -584,37 +633,52 @@ class MainActivity : ComponentActivity() {
         else "Autofocus enabled; tap to lock focus at infinity and disable blur."
     }
 
-    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applySelectedFocus() {
+        when {
+            infinityFocusEnabled -> applyManualLensFocus(0f)
+            activeMode == ReferenceRenderer.Mode.LANDSCAPE && landscapeFocusDistance != null ->
+                applyManualLensFocus(landscapeFocusDistance)
+            else -> applyManualLensFocus(null)
+        }
+    }
+
     private fun applyInfinityFocus(enabled: Boolean) {
+        val distance = if (enabled) 0f else if (activeMode == ReferenceRenderer.Mode.LANDSCAPE) landscapeFocusDistance else null
+        applyManualLensFocus(distance)
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applyManualLensFocus(distanceDiopters: Float?) {
         val camera = boundCamera ?: return
         if (!manualLensFocusSupported) return
         try {
             val control = Camera2CameraControl.from(camera.cameraControl)
-            val future = if (enabled) {
+            val future = if (distanceDiopters != null) {
                 val options = CaptureRequestOptions.Builder()
                     .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                    .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+                    .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, distanceDiopters)
                     .build()
                 control.setCaptureRequestOptions(options)
             } else control.clearCaptureRequestOptions()
             future.addListener({
                 try { future.get() } catch (_: Exception) {
-                    if (enabled && infinityFocusEnabled) runOnUiThread {
+                    if (distanceDiopters == 0f && infinityFocusEnabled) runOnUiThread {
                         infinityFocusEnabled = false
                         getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", false).apply()
                         updateInfinityFocusButton()
                         updateLiveLook()
-                        if (activeMode == ReferenceRenderer.Mode.CLOSE_UP) bindCamera()
+                        applySelectedFocus()
                         message("Infinity focus could not be applied by this camera.")
                     }
                 }
             }, ContextCompat.getMainExecutor(this))
         } catch (_: Exception) {
-            if (enabled) {
+            if (distanceDiopters == 0f && infinityFocusEnabled) {
                 infinityFocusEnabled = false
                 getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", false).apply()
                 updateInfinityFocusButton()
                 updateLiveLook()
+                applySelectedFocus()
                 message("Infinity focus could not be applied by this camera.")
             }
         }
@@ -664,6 +728,7 @@ class MainActivity : ComponentActivity() {
             // Applying OEM bokeh before software depth estimation can erase depth cues
             // and leave a second blurred edge around the selected subject.
             ReferenceRenderer.Mode.CLOSE_UP -> null
+            ReferenceRenderer.Mode.SUNSET, ReferenceRenderer.Mode.LONG_EXPOSURE, ReferenceRenderer.Mode.LANDSCAPE -> null
         }
         var selector = baseSelector
         var usingExtension = false
@@ -724,7 +789,7 @@ class MainActivity : ComponentActivity() {
                 val baseCapture = newCapture(baseCaptureMode)
                 // The GPU shader already grades the live preview on Android 13+.
                 // Keep analysis only where it supplies the fallback look or depth map.
-                val needsAnalysis = liveCameraEffect == null || (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled)
+                val needsAnalysis = liveCameraEffect == null || (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE
                 val baseAnalysis = if (needsAnalysis) newAnalysis().also {
                     it.setAnalyzer(analysisExecutor) { proxy -> processPreviewFrame(proxy) }
                 } else null
@@ -749,7 +814,7 @@ class MainActivity : ComponentActivity() {
             imageAnalysis = analysis
             boundCamera = camera
             updateInfinityFocusSupport(camera?.cameraInfo)
-            if (infinityFocusEnabled) applyInfinityFocus(true)
+            applySelectedFocus()
             configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
@@ -824,11 +889,11 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         val now = System.nanoTime()
         val effect = liveCameraEffect
-        if (effect != null && mode != ReferenceRenderer.Mode.CLOSE_UP) {
+        if (effect != null && mode != ReferenceRenderer.Mode.CLOSE_UP && mode != ReferenceRenderer.Mode.LONG_EXPOSURE) {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null && mode == ReferenceRenderer.Mode.CLOSE_UP) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.LONG_EXPOSURE) 180_000_000L else if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -864,6 +929,11 @@ class MainActivity : ComponentActivity() {
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
             if (effect != null) {
+                if (mode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
+                    effect.updateTrailFrame(oriented)
+                    oriented.recycle()
+                    return
+                }
                 if (infinityFocusEnabled) return
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
                 val guide = processor.createDepthGuide(oriented)
@@ -877,7 +947,7 @@ class MainActivity : ComponentActivity() {
                 }
                 return
             }
-            val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio, activeFinish)
+            val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio, activeFinish, currentEffects())
             styled = colorized
             oriented.recycle()
             var output: Bitmap = colorized
@@ -974,7 +1044,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled)
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
     }
 
     private fun updateFinishButtons() {
@@ -995,7 +1065,8 @@ class MainActivity : ComponentActivity() {
         modeRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         modeRow.setPadding(0, dp(2), 0, dp(2))
         modeButtons.values.forEach { button ->
-            button.setPadding(dp(10), dp(4), dp(10), dp(4))
+            button.setPadding(if (landscape) dp(10) else dp(4), dp(4), if (landscape) dp(10) else dp(4), dp(4))
+            button.textSize = if (landscape) 14f else 12f
             button.layoutParams = LinearLayout.LayoutParams(
                 if (landscape) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
                 if (landscape) dp(28) else ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1059,6 +1130,49 @@ class MainActivity : ComponentActivity() {
         updateLiveLook()
     }
 
+    private fun effectLabel(effect: String) = when (effect) {
+        "glow" -> "Glow"
+        "flare" -> "Flare"
+        else -> "Vignette"
+    }
+
+    private fun currentEffects() = ReferenceRenderer.Effects(glowEnabled, flareEnabled, vignetteEnabled)
+
+    private fun toggleCreativeEffect(effect: String) {
+        when (effect) {
+            "glow" -> {
+                glowEnabled = !glowEnabled
+                getPreferences(MODE_PRIVATE).edit().putBoolean("effect_glow", glowEnabled).apply()
+            }
+            "flare" -> {
+                flareEnabled = !flareEnabled
+                getPreferences(MODE_PRIVATE).edit().putBoolean("effect_flare", flareEnabled).apply()
+            }
+            "vignette" -> {
+                vignetteEnabled = !vignetteEnabled
+                getPreferences(MODE_PRIVATE).edit().putBoolean("effect_vignette", vignetteEnabled).apply()
+            }
+        }
+        updateCreativeEffectButtons()
+        updateLiveLook()
+        sourceBitmap?.let { renderImported(it) }
+    }
+
+    private fun updateCreativeEffectButtons() {
+        if (creativeEffectButtons.isEmpty()) return
+        creativeEffectButtons.forEach { (effect, button) ->
+            val enabled = when (effect) {
+                "glow" -> glowEnabled
+                "flare" -> flareEnabled
+                else -> vignetteEnabled
+            }
+            button.text = "${effectLabel(effect)} ${if (enabled) "On" else "Off"}"
+            button.setTextColor(if (enabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+            button.setTypeface(null, if (enabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            button.contentDescription = "${effectLabel(effect)} effect, ${if (enabled) "on" else "off"}"
+        }
+    }
+
     private fun updateNightEnhancementButton() {
         if (!::nightEnhancementButton.isInitialized) return
         val state = if (nightEnhancementEnabled) "On" else "Off"
@@ -1074,6 +1188,7 @@ class MainActivity : ComponentActivity() {
         strengthRow.visibility = if (show) View.VISIBLE else View.GONE
         detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
         nightEnhancementButton.visibility = if (show && activeMode == ReferenceRenderer.Mode.NIGHT) View.VISIBLE else View.GONE
+        creativeEffectsRow.visibility = if (show) View.VISIBLE else View.GONE
         if (::exposureRow.isInitialized && previewView.visibility == View.VISIBLE) updateExposureControl(show)
     }
 
@@ -1111,6 +1226,48 @@ class MainActivity : ComponentActivity() {
         val finishAtCapture = activeFinish
         val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
         val infinityFocusAtCapture = infinityFocusEnabled
+        val effectsAtCapture = currentEffects()
+        if (modeAtCapture == ReferenceRenderer.Mode.LONG_EXPOSURE) {
+            setNightCaptureActive(true)
+            setNightCaptureProgress(1, 5)
+            captureNightFrames(capture, mutableListOf(), 0, totalFrames = 5) { frames ->
+                if (frames == null) {
+                    runOnUiThread {
+                        isBusy = false
+                        setNightCaptureActive(false)
+                        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                        refreshShutterAvailability()
+                        message("Trail capture failed; try again with the phone steadier.")
+                        updateStatus()
+                    }
+                } else {
+                    runOnUiThread {
+                        isBusy = false
+                        setNightCaptureActive(false)
+                        refreshShutterAvailability()
+                        showQueueStatus()
+                    }
+                    photoProcessingExecutor.execute {
+                        try {
+                            val merged = NightBurstMerger.mergeTrails(frames)
+                            processCapturedBitmap(
+                                merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture,
+                                modeAtCapture, strengthAtCapture, finishAtCapture,
+                                nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture
+                            )
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                                refreshShutterAvailability()
+                                message("Trail photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                                updateStatus()
+                            }
+                        }
+                    }
+                }
+            }
+            return
+        }
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
@@ -1132,7 +1289,7 @@ class MainActivity : ComponentActivity() {
                     photoProcessingExecutor.execute {
                         try {
                             val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
-                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture)
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1171,7 +1328,7 @@ class MainActivity : ComponentActivity() {
                         try {
                             val merged = NightBurstMerger.mergeDetail(frames)
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
-                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture)
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1189,13 +1346,13 @@ class MainActivity : ComponentActivity() {
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureStarted() {
                 runOnUiThread {
-                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) setStatusMessage("Taking photo…")
+                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo…")
                 }
             }
 
             override fun onCaptureProcessProgressed(progress: Int) {
                 runOnUiThread {
-                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) setStatusMessage("Taking photo · $progress%")
+                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo · $progress%")
                 }
             }
 
@@ -1234,7 +1391,7 @@ class MainActivity : ComponentActivity() {
                         val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
                             decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image")
                         processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
-                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture)
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
                     } catch (e: Exception) {
                         runOnUiThread {
                             pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1263,9 +1420,10 @@ class MainActivity : ComponentActivity() {
         capture: ImageCapture,
         frames: MutableList<NightBurstMerger.Frame>,
         index: Int,
+        totalFrames: Int = 2,
         onComplete: (List<NightBurstMerger.Frame>?) -> Unit
     ) {
-        if (index >= 2) {
+        if (index >= totalFrames) {
             onComplete(frames.toList())
             return
         }
@@ -1286,10 +1444,10 @@ class MainActivity : ComponentActivity() {
                         return
                     }
                     frames += nextFrame
-                    if (index + 1 < 2) {
-                        runOnUiThread { setNightCaptureProgress(index + 2, 2) }
+                    if (index + 1 < totalFrames) {
+                        runOnUiThread { setNightCaptureProgress(index + 2, totalFrames) }
                     }
-                    captureNightFrames(capture, frames, index + 1, onComplete)
+                    captureNightFrames(capture, frames, index + 1, totalFrames, onComplete)
                 }
                 override fun onError(error: ImageCaptureException) { onComplete(null) }
             })
@@ -1305,7 +1463,8 @@ class MainActivity : ComponentActivity() {
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish,
         nightEnhanceAtCapture: Boolean = false,
-        infinityFocusAtCapture: Boolean = false
+        infinityFocusAtCapture: Boolean = false,
+        effectsAtCapture: ReferenceRenderer.Effects = ReferenceRenderer.Effects()
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -1314,7 +1473,7 @@ class MainActivity : ComponentActivity() {
             val imageForStyle = if (nightEnhanceAtCapture && modeAtCapture == ReferenceRenderer.Mode.NIGHT) {
                 NightEnhancement.apply(upright).also { enhanced = it }
             } else upright
-            val styled = ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
+            val styled = ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture, effectsAtCapture)
             style = styled
             val focus = mapFocusToFrame(
                 focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
@@ -1397,6 +1556,7 @@ class MainActivity : ComponentActivity() {
                     exposureRow.visibility = View.GONE
                     detailMergeButton.visibility = View.GONE
                     nightEnhancementButton.visibility = View.GONE
+                    creativeEffectsRow.visibility = View.GONE
                     infinityFocusButton.visibility = View.GONE
                     renderImported(upright)
                 }
@@ -1408,7 +1568,7 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         cameraExecutor.execute {
             try {
-                val styled = ReferenceRenderer.render(source, styleStrength, mode, finish = activeFinish)
+                val styled = ReferenceRenderer.render(source, styleStrength, mode, finish = activeFinish, effects = currentEffects())
                 val focus = mapFocusToFrame(
                     focusX, focusY, processedPreviewView.width, processedPreviewView.height,
                     source.width, source.height, false
@@ -1545,6 +1705,9 @@ class MainActivity : ComponentActivity() {
         ReferenceRenderer.Mode.DAY -> "Day"
         ReferenceRenderer.Mode.NIGHT -> "Night"
         ReferenceRenderer.Mode.CLOSE_UP -> "Close-up"
+        ReferenceRenderer.Mode.SUNSET -> "Sunset"
+        ReferenceRenderer.Mode.LONG_EXPOSURE -> "Long exp."
+        ReferenceRenderer.Mode.LANDSCAPE -> "Landscape"
     }
     private fun message(text: String) = setStatusMessage(text, 2_800L)
 
