@@ -47,6 +47,7 @@ import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.camera.core.ZoomState
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -126,9 +127,9 @@ class MainActivity : ComponentActivity() {
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var nightExtensionActive = false
     private var isBusy = false
-    // Keep at most three captures outstanding (one processing and up to two waiting).
+    // Limit queued JPEGs while one full-resolution image is being processed.
     private var pendingPhotoCount = 0
-    private val maxPendingPhotos = 3
+    private val maxPendingPhotos = 5
     private var statusMessageGeneration = 0
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
@@ -144,6 +145,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var captureControls: LinearLayout
     private lateinit var editControls: LinearLayout
     private lateinit var controlOverlay: FrameLayout
+    private lateinit var photoFeedbackLayer: FrameLayout
+    private lateinit var landscapeActions: LinearLayout
+    private lateinit var moreButton: TextView
+    private var landscapeControlsActive: Boolean? = null
+    private data class LongExposureSettings(val exposureTimeNanos: Long, val sensitivityIso: Int, val frameDurationNanos: Long)
+    private var longExposureSettings: LongExposureSettings? = null
 
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else message("Camera permission is needed to take photos.")
@@ -213,6 +220,8 @@ class MainActivity : ComponentActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(processedPreviewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(imageView, FrameLayout.LayoutParams(-1, -1))
+        photoFeedbackLayer = FrameLayout(this).apply { isClickable = false; isFocusable = false }
+        root.addView(photoFeedbackLayer, FrameLayout.LayoutParams(-1, -1))
         root.addView(focusIndicator, FrameLayout.LayoutParams(dp(56), dp(56)))
         buildNightCaptureIndicator(root)
         previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
@@ -434,11 +443,11 @@ class MainActivity : ComponentActivity() {
         }
         captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(64), dp(64)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        captureControls.addView(pill("More") {
+        moreButton = pill("More") {
             moreMenuExpanded = !moreMenuExpanded
             updateMoreMenu()
-        },
-            LinearLayout.LayoutParams(dp(54), dp(36)))
+        }
+        captureControls.addView(moreButton, LinearLayout.LayoutParams(dp(54), dp(36)))
         bottom.addView(captureControls)
 
         editControls = LinearLayout(this).apply {
@@ -451,6 +460,14 @@ class MainActivity : ComponentActivity() {
         editControls.addView(pill("Choose another") { choosePhoto.launch("image/*") }, LinearLayout.LayoutParams(0, dp(44), 1f))
         bottom.addView(editControls)
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        landscapeActions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        overlay.addView(landscapeActions, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START or Gravity.BOTTOM
+        ).apply { marginStart = dp(66); bottomMargin = dp(12) })
         applyCameraControlLayout(resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
@@ -466,8 +483,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun applyCameraControlLayout(landscape: Boolean) {
-        if (!::zoomRow.isInitialized || !::bottomPanel.isInitialized) return
+        if (!::zoomRow.isInitialized || !::bottomPanel.isInitialized || !::landscapeActions.isInitialized) return
         zoomRow.setVertical(landscape)
+        landscapeActions.visibility = if (landscape) View.VISIBLE else View.GONE
         zoomRow.layoutParams = if (landscape) {
             FrameLayout.LayoutParams(dp(48), dp(250), Gravity.START or Gravity.CENTER_VERTICAL).apply {
                 marginStart = dp(12)
@@ -585,6 +603,22 @@ class MainActivity : ComponentActivity() {
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
+    private fun getLongExposureSettings(cameraInfo: CameraInfo?): LongExposureSettings? {
+        return try {
+            val info = cameraInfo ?: return null
+            val camera2 = Camera2CameraInfo.from(info)
+            val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            if (capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) != true) return null
+            val exposureRange = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: return null
+            val sensitivityRange = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
+            val maxFrame = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: exposureRange.upper
+            val maximumDuration = minOf(exposureRange.upper, maxFrame, 4_000_000_000L)
+            val duration = maximumDuration.coerceAtLeast(exposureRange.lower)
+            if (duration < 100_000_000L) return null
+            LongExposureSettings(duration, sensitivityRange.lower, duration)
+        } catch (_: Exception) { null }
+    }
+
     private fun updateInfinityFocusSupport(cameraInfo: CameraInfo?) {
         infinityFocusSupported = false
         manualLensFocusSupported = false
@@ -716,7 +750,7 @@ class MainActivity : ComponentActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    @OptIn(ExperimentalZeroShutterLag::class)
+    @OptIn(ExperimentalZeroShutterLag::class, ExperimentalCamera2Interop::class)
     private fun bindCamera() {
         val provider = cameraProvider ?: return
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
@@ -742,16 +776,27 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { }
         }
         try {
+            longExposureSettings = getLongExposureSettings(try { provider.getCameraInfo(baseSelector) } catch (_: Exception) { null })
             // CameraX extensions support Preview and ImageCapture, not ImageAnalysis.
             // Bind the vendor Night pipeline without analysis so it isn't silently
             // rejected and replaced by our software fallback.
             fun newPreview() = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
                 .build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            fun newCapture(mode: Int) = ImageCapture.Builder()
-                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .setCaptureMode(mode)
-                .setFlashMode(flashMode)
-                .build()
+            fun newCapture(mode: Int): ImageCapture {
+                val builder = ImageCapture.Builder()
+                    .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                    .setCaptureMode(mode)
+                    .setFlashMode(if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) ImageCapture.FLASH_MODE_OFF else flashMode)
+                val settings = longExposureSettings
+                if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE && settings != null) {
+                    Camera2Interop.Extender(builder)
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                        .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, settings.exposureTimeNanos)
+                        .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, settings.sensitivityIso)
+                        .setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, settings.frameDurationNanos)
+                }
+                return builder.build()
+            }
             fun newAnalysis() = ImageAnalysis.Builder()
                 .setTargetResolution(Size(320, 240))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -789,7 +834,7 @@ class MainActivity : ComponentActivity() {
                 val baseCapture = newCapture(baseCaptureMode)
                 // The GPU shader already grades the live preview on Android 13+.
                 // Keep analysis only where it supplies the fallback look or depth map.
-                val needsAnalysis = liveCameraEffect == null || (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE
+                val needsAnalysis = liveCameraEffect == null || (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled)
                 val baseAnalysis = if (needsAnalysis) newAnalysis().also {
                     it.setAnalyzer(analysisExecutor) { proxy -> processPreviewFrame(proxy) }
                 } else null
@@ -820,6 +865,7 @@ class MainActivity : ComponentActivity() {
             livePreviewAvailable = live
             val rearCameraHasFlash = try { provider.getCameraInfo(baseSelector).hasFlashUnit() } catch (_: Exception) { false }
             flashButton.visibility = if (lensFacing == CameraSelector.LENS_FACING_BACK && rearCameraHasFlash) View.VISIBLE else View.INVISIBLE
+            updateFlashButtonAvailability()
             previewView.visibility = View.VISIBLE
             processedPreviewView.visibility = View.GONE
             imageView.visibility = View.GONE
@@ -889,11 +935,11 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         val now = System.nanoTime()
         val effect = liveCameraEffect
-        if (effect != null && mode != ReferenceRenderer.Mode.CLOSE_UP && mode != ReferenceRenderer.Mode.LONG_EXPOSURE) {
+        if (effect != null && mode != ReferenceRenderer.Mode.CLOSE_UP) {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null && mode == ReferenceRenderer.Mode.CLOSE_UP) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.LONG_EXPOSURE) 180_000_000L else if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -929,11 +975,6 @@ class MainActivity : ComponentActivity() {
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
             if (effect != null) {
-                if (mode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
-                    effect.updateTrailFrame(oriented)
-                    oriented.recycle()
-                    return
-                }
                 if (infinityFocusEnabled) return
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
                 val guide = processor.createDepthGuide(oriented)
@@ -1009,6 +1050,14 @@ class MainActivity : ComponentActivity() {
         bindCamera()
     }
 
+    private fun updateFlashButtonAvailability() {
+        if (!::flashButton.isInitialized) return
+        val available = activeMode != ReferenceRenderer.Mode.LONG_EXPOSURE
+        flashButton.isEnabled = available
+        flashButton.alpha = if (available) 1f else 0.45f
+        flashButton.contentDescription = if (available) "Flash: ${flashButton.text}" else "Flash is disabled during manual long exposure"
+    }
+
     private fun cycleFlash() {
         flashMode = when (flashMode) {
             ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
@@ -1025,6 +1074,7 @@ class MainActivity : ComponentActivity() {
 
     private fun selectMode(mode: ReferenceRenderer.Mode) {
         activeMode = mode
+        updateFlashButtonAvailability()
         updateLiveLook()
         if (mode != ReferenceRenderer.Mode.CLOSE_UP) {
             analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
@@ -1061,7 +1111,7 @@ class MainActivity : ComponentActivity() {
         if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
         bottomPanel.setPadding(dp(8), dp(7), dp(8), dp(6))
 
-        // In landscape, stack each control group inside the right-side camera panel.
+        // Keep mode and finish choices stacked in the compact right-side panel.
         modeRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         modeRow.setPadding(0, dp(2), 0, dp(2))
         modeButtons.values.forEach { button ->
@@ -1086,17 +1136,32 @@ class MainActivity : ComponentActivity() {
             button.layoutParams = lp
         }
 
-        captureControls.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
-        captureControls.gravity = if (landscape) Gravity.CENTER else Gravity.CENTER_VERTICAL
-        captureControls.setPadding(0, dp(2), 0, 0)
-        listOf(captureControls.getChildAt(1), captureControls.getChildAt(3)).forEach { spacer ->
-            spacer.visibility = if (landscape) View.GONE else View.VISIBLE
-            spacer.layoutParams = if (landscape) LinearLayout.LayoutParams(0, 0) else LinearLayout.LayoutParams(0, 1, 1f)
+        if (landscapeControlsActive != landscape) {
+            (thumbnailButton.parent as? ViewGroup)?.removeView(thumbnailButton)
+            (moreButton.parent as? ViewGroup)?.removeView(moreButton)
+            captureControls.removeAllViews()
+            landscapeActions.removeAllViews()
+            if (landscape) {
+                landscapeActions.addView(thumbnailButton, LinearLayout.LayoutParams(dp(42), dp(42)).apply { bottomMargin = dp(8) })
+                landscapeActions.addView(moreButton, LinearLayout.LayoutParams(dp(64), dp(36)))
+                captureControls.orientation = LinearLayout.VERTICAL
+                captureControls.gravity = Gravity.CENTER
+                captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(58), dp(58)))
+            } else {
+                captureControls.orientation = LinearLayout.HORIZONTAL
+                captureControls.gravity = Gravity.CENTER_VERTICAL
+                captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(42), dp(42)))
+                captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(64), dp(64)))
+                captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                captureControls.addView(moreButton, LinearLayout.LayoutParams(dp(54), dp(36)))
+            }
+            landscapeControlsActive = landscape
         }
-        resizeControl(thumbnailButton, if (landscape) 38 else 42, if (landscape) 38 else 42)
+        captureControls.setPadding(0, dp(2), 0, 0)
+        resizeControl(thumbnailButton, 42, 42)
         resizeControl(shutterButton, if (landscape) 58 else 64, if (landscape) 58 else 64)
-        val more = captureControls.getChildAt(captureControls.childCount - 1)
-        resizeControl(more, if (landscape) 72 else 54, if (landscape) 32 else 36)
+        resizeControl(moreButton, if (landscape) 64 else 54, 36)
     }
 
     private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {
@@ -1204,6 +1269,10 @@ class MainActivity : ComponentActivity() {
 
     private fun capture() {
         if (isBusy) return
+        if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE && longExposureSettings == null) {
+            message("This camera does not support manual long exposure.")
+            return
+        }
         if (pendingPhotoCount >= maxPendingPhotos) {
             message("Photo queue is full; wait for a save to finish.")
             return
@@ -1215,6 +1284,9 @@ class MainActivity : ComponentActivity() {
         if (activeMode == ReferenceRenderer.Mode.NIGHT) {
             setNightCaptureActive(true)
             if (!nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) setNightCaptureProgress(1, 2)
+        } else if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
+            val seconds = (longExposureSettings?.exposureTimeNanos ?: 0L) / 1_000_000_000f
+            setStatusMessage("Long exposure · ${"%.1f".format(seconds)} s · hold steady")
         } else setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
@@ -1227,47 +1299,6 @@ class MainActivity : ComponentActivity() {
         val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
         val infinityFocusAtCapture = infinityFocusEnabled
         val effectsAtCapture = currentEffects()
-        if (modeAtCapture == ReferenceRenderer.Mode.LONG_EXPOSURE) {
-            setNightCaptureActive(true)
-            setNightCaptureProgress(1, 5)
-            captureNightFrames(capture, mutableListOf(), 0, totalFrames = 5) { frames ->
-                if (frames == null) {
-                    runOnUiThread {
-                        isBusy = false
-                        setNightCaptureActive(false)
-                        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
-                        refreshShutterAvailability()
-                        message("Trail capture failed; try again with the phone steadier.")
-                        updateStatus()
-                    }
-                } else {
-                    runOnUiThread {
-                        isBusy = false
-                        setNightCaptureActive(false)
-                        refreshShutterAvailability()
-                        showQueueStatus()
-                    }
-                    photoProcessingExecutor.execute {
-                        try {
-                            val merged = NightBurstMerger.mergeTrails(frames)
-                            processCapturedBitmap(
-                                merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture,
-                                modeAtCapture, strengthAtCapture, finishAtCapture,
-                                nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture
-                            )
-                        } catch (e: Exception) {
-                            runOnUiThread {
-                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
-                                refreshShutterAvailability()
-                                message("Trail photo processing failed: ${e.localizedMessage ?: "unknown error"}")
-                                updateStatus()
-                            }
-                        }
-                    }
-                }
-            }
-            return
-        }
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
@@ -1375,6 +1406,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val rotation = image.imageInfo.rotationDegrees
                 image.close()
+                runOnUiThread { showPolaroidFeedback() }
                 runOnUiThread {
                     isBusy = false
                     setNightCaptureActive(false)
@@ -1416,6 +1448,82 @@ class MainActivity : ComponentActivity() {
         })
     }
 
+    private fun showPolaroidFeedback() {
+        if (!::photoFeedbackLayer.isInitialized || !::shutterButton.isInitialized ||
+            photoFeedbackLayer.width == 0 || !::thumbnailButton.isInitialized) return
+        val layer = photoFeedbackLayer
+        val flash = View(this).apply {
+            setBackgroundColor(Color.WHITE)
+            alpha = 0f
+            isClickable = false
+        }
+        layer.addView(flash, FrameLayout.LayoutParams(-1, -1))
+        flash.animate().alpha(0.68f).setDuration(45L).withEndAction {
+            flash.animate().alpha(0f).setDuration(170L).withEndAction { layer.removeView(flash) }.start()
+        }.start()
+
+        val cardWidth = dp(62)
+        val cardHeight = dp(76)
+        val card = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = dp(3).toFloat()
+            }
+            elevation = dp(8).toFloat()
+            alpha = 0f
+            scaleX = 0.72f
+            scaleY = 0.72f
+            rotation = -8f
+        }
+        val image = View(this).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(0xff173f41.toInt(), 0xffe1a65c.toInt(), 0xff6d352e.toInt())
+            ).apply { cornerRadius = dp(2).toFloat() }
+        }
+        card.addView(image, FrameLayout.LayoutParams(cardWidth - dp(10), dp(52), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(5)
+        })
+        val captionMark = View(this).apply {
+            background = rounded(0xffd4d4d4.toInt(), 4)
+        }
+        card.addView(captionMark, FrameLayout.LayoutParams(dp(20), dp(2), Gravity.BOTTOM or Gravity.START).apply {
+            leftMargin = dp(6)
+            bottomMargin = dp(6)
+        })
+        layer.addView(card, FrameLayout.LayoutParams(cardWidth, cardHeight, Gravity.TOP or Gravity.START))
+
+        val layerLocation = IntArray(2)
+        val shutterLocation = IntArray(2)
+        val albumLocation = IntArray(2)
+        layer.getLocationOnScreen(layerLocation)
+        shutterButton.getLocationOnScreen(shutterLocation)
+        thumbnailButton.getLocationOnScreen(albumLocation)
+        val startX = shutterLocation[0] - layerLocation[0] + (shutterButton.width - cardWidth) / 2f
+        val startY = shutterLocation[1] - layerLocation[1] + (shutterButton.height - cardHeight) / 2f
+        val endX = albumLocation[0] - layerLocation[0] + (thumbnailButton.width - cardWidth) / 2f
+        val endY = albumLocation[1] - layerLocation[1] + (thumbnailButton.height - cardHeight) / 2f
+        card.translationX = startX
+        card.translationY = startY
+        card.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(90L)
+            .withEndAction {
+                card.animate()
+                    .translationX(endX)
+                    .translationY(endY)
+                    .scaleX(0.34f)
+                    .scaleY(0.34f)
+                    .alpha(0.05f)
+                    .setDuration(520L)
+                    .withEndAction { layer.removeView(card) }
+                    .start()
+            }
+            .start()
+    }
+
     private fun captureNightFrames(
         capture: ImageCapture,
         frames: MutableList<NightBurstMerger.Frame>,
@@ -1424,6 +1532,7 @@ class MainActivity : ComponentActivity() {
         onComplete: (List<NightBurstMerger.Frame>?) -> Unit
     ) {
         if (index >= totalFrames) {
+            runOnUiThread { showPolaroidFeedback() }
             onComplete(frames.toList())
             return
         }

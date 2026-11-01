@@ -40,63 +40,6 @@ object NightBurstMerger {
      * the accumulated scene, then only significantly brighter moving pixels are
      * retained so stationary areas remain close to the first exposure.
      */
-    fun mergeTrails(frames: List<Frame>): Bitmap {
-        require(frames.size in 3..6) { "Trail merge expects three to six captures" }
-        val base = decodeUpright(frames.first(), mutable = true)
-        var aligned: Bitmap? = null
-        try {
-            val width = base.width
-            val height = base.height
-            val composite = IntArray(width * height)
-            base.getPixels(composite, 0, width, 0, 0, width, height)
-            for (frame in frames.drop(1)) {
-                val second = decodeUpright(frame, mutable = false)
-                val alignedFrame = if (second.width != width || second.height != height) {
-                    Bitmap.createScaledBitmap(second, width, height, true).also {
-                        if (it !== second) second.recycle()
-                    }
-                } else second
-                aligned = alignedFrame
-                val (dx, dy) = estimateShift(composite, alignedFrame, width, height, ALIGNMENT_SCALE)
-                val secondRow = IntArray(width)
-                for (y in 0 until height) {
-                    val sourceY = y + dy
-                    if (sourceY !in 0 until height) continue
-                    alignedFrame.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
-                    val rowOffset = y * width
-                    for (x in 0 until width) {
-                        val sourceX = x + dx
-                        if (sourceX !in 0 until width) continue
-                        val index = rowOffset + x
-                        val previous = composite[index]
-                        val candidate = secondRow[sourceX]
-                        val previousLuma = luma(previous)
-                        val candidateLuma = luma(candidate)
-                        if (candidateLuma >= 142 && candidateLuma > previousLuma + 22) {
-                            composite[index] = maxRgb(previous, candidate)
-                        }
-                    }
-                }
-                alignedFrame.recycle()
-                aligned = null
-            }
-            base.setPixels(composite, 0, width, 0, 0, width, height)
-            return base
-        } catch (e: Exception) {
-            base.recycle()
-            throw e
-        } finally {
-            aligned?.recycle()
-        }
-    }
-
-    private fun maxRgb(a: Int, b: Int): Int {
-        val red = max(a ushr 16 and 0xff, b ushr 16 and 0xff)
-        val green = max(a ushr 8 and 0xff, b ushr 8 and 0xff)
-        val blue = max(a and 0xff, b and 0xff)
-        return (0xff shl 24) or (red shl 16) or (green shl 8) or blue
-    }
-
     private fun mergeInternal(frames: List<Frame>, detailAlignment: Boolean): Bitmap {
         require(frames.size == 2) { "Burst merge expects two captures" }
         // Decode the reference mutable so we can reuse it directly. This avoids

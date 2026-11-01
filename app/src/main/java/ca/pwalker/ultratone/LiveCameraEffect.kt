@@ -22,16 +22,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private var focusY = 0.5f
     private var hasFreshDepthGuide = false
     private var infinityFocus = false
-    private var trailBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
-    private var trailPeakLuma: IntArray? = null
-    private var trailPeakColor: IntArray? = null
-    private var trailAge: IntArray? = null
-    private var trailWidth = 0
-    private var trailHeight = 0
-
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        shader.setInputShader("trailGuide", BitmapShader(trailBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setFloatUniform("strength", 0.78f)
         shader.setFloatUniform("zoomRatio", 1f)
         shader.setIntUniform("mode", 0)
@@ -49,7 +41,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     }
 
     fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects()) {
-        if (this.mode != mode) resetTrailHistory()
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
@@ -91,82 +82,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         )
     }
 
-    /** Builds a small live light-trail guide from recent preview frames. */
-    @Synchronized fun updateTrailFrame(frame: Bitmap) {
-        if (mode != ReferenceRenderer.Mode.LONG_EXPOSURE) return
-        val width = frame.width
-        val height = frame.height
-        val size = width * height
-        if (width != trailWidth || height != trailHeight || trailPeakLuma == null) {
-            trailWidth = width
-            trailHeight = height
-            trailPeakLuma = IntArray(size)
-            trailPeakColor = IntArray(size)
-            trailAge = IntArray(size)
-        }
-        val pixels = IntArray(size)
-        frame.getPixels(pixels, 0, width, 0, 0, width, height)
-        val peaks = trailPeakLuma!!
-        val peakColors = trailPeakColor!!
-        val ages = trailAge!!
-        val overlay = IntArray(size)
-        for (i in 0 until size) {
-            val pixel = pixels[i]
-            val currentLuma = (54 * (pixel ushr 16 and 0xff) +
-                183 * (pixel ushr 8 and 0xff) + 19 * (pixel and 0xff)) shr 8
-            val previousPeak = peaks[i]
-            if (currentLuma > previousPeak) {
-                peaks[i] = currentLuma
-                peakColors[i] = pixel
-            }
-            ages[i] = (ages[i] - 1).coerceAtLeast(0)
-            if (previousPeak >= 165 && previousPeak > currentLuma + 28) {
-                ages[i] = 5
-            }
-            if (ages[i] > 0) {
-                val color = peakColors[i]
-                val alpha = (ages[i] * 22).coerceAtMost(110)
-                overlay[i] = (alpha shl 24) or (color and 0x00ffffff)
-            } else if (currentLuma < previousPeak - 40) {
-                peaks[i] = currentLuma
-                peakColors[i] = pixel
-            }
-        }
-        val updated = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
-            setPixels(overlay, 0, width, 0, 0, width, height)
-        }
-        mainHandler.post {
-            if (mode != ReferenceRenderer.Mode.LONG_EXPOSURE || view.width == 0) {
-                updated.recycle()
-                return@post
-            }
-            val old = trailBitmap
-            trailBitmap = updated
-            shader.setInputShader("trailGuide", BitmapShader(updated, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-            updateSize()
-            view.invalidate()
-            view.postInvalidateOnAnimation()
-            if (old != null && old !== updated && !old.isRecycled) {
-                mainHandler.postDelayed({ if (old !== trailBitmap && !old.isRecycled) old.recycle() }, 2_000L)
-            }
-        }
-    }
-
-    @Synchronized private fun resetTrailHistory() {
-        trailPeakLuma = null
-        trailPeakColor = null
-        trailAge = null
-        trailWidth = 0
-        trailHeight = 0
-        val cleared = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
-        val old = trailBitmap
-        trailBitmap = cleared
-        shader.setInputShader("trailGuide", BitmapShader(cleared, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        if (old != null && old !== cleared && !old.isRecycled) {
-            mainHandler.postDelayed({ if (old !== trailBitmap && !old.isRecycled) old.recycle() }, 2_000L)
-        }
-    }
-
     /** Takes ownership of the guide bitmap and keeps the previous GPU input alive briefly. */
     fun updateDepthGuide(bitmap: Bitmap) {
         val old = depthBitmap
@@ -205,33 +120,13 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             -offsetX * scaleX,
             -offsetY * scaleY
         )
-        val trail = trailBitmap
-        val trailWidth = trail?.width?.coerceAtLeast(1)?.toFloat() ?: 1f
-        val trailHeight = trail?.height?.coerceAtLeast(1)?.toFloat() ?: 1f
-        val trailFit = minOf(viewWidth / trailWidth, viewHeight / trailHeight)
-        val trailRenderedWidth = trailWidth * trailFit
-        val trailRenderedHeight = trailHeight * trailFit
-        val trailOffsetX = (viewWidth - trailRenderedWidth) / 2f
-        val trailOffsetY = (viewHeight - trailRenderedHeight) / 2f
-        shader.setFloatUniform(
-            "trailScale",
-            trailWidth / trailRenderedWidth.coerceAtLeast(1f),
-            trailHeight / trailRenderedHeight.coerceAtLeast(1f)
-        )
-        shader.setFloatUniform(
-            "trailOffset",
-            -trailOffsetX * trailWidth / trailRenderedWidth.coerceAtLeast(1f),
-            -trailOffsetY * trailHeight / trailRenderedHeight.coerceAtLeast(1f)
-        )
         setFocus(focusX, focusY)
     }
 
     fun close() {
         view.setRenderEffect(null)
         depthBitmap?.let { if (!it.isRecycled) it.recycle() }
-        trailBitmap?.let { if (!it.isRecycled) it.recycle() }
         depthBitmap = null
-        trailBitmap = null
     }
 
     companion object {
@@ -243,7 +138,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         private val SOURCE = """
             uniform shader cameraImage;
             uniform shader depthGuide;
-            uniform shader trailGuide;
             uniform float strength;
             uniform float zoomRatio;
             uniform int mode;
@@ -256,8 +150,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform float2 viewSize;
             uniform float2 depthScale;
             uniform float2 depthOffset;
-            uniform float2 trailScale;
-            uniform float2 trailOffset;
             uniform float2 focusPoint;
 
             float lumaOf(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
@@ -367,13 +259,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         float streak = smoothstep(0.84, 0.995, flareSource) * 0.105;
                         result += float3(streak, streak * 0.78, streak * 0.46);
                     }
-                }
-                if (mode == 4) {
-                    float4 trail = trailGuide.eval(p * trailScale + trailOffset);
-                    float3 trailColor = monochrome == 1
-                        ? float3(lumaOf(trail.rgb))
-                        : trail.rgb;
-                    result += trailColor * 0.62;
                 }
                 if (vignetteEnabled == 1) {
                     float2 centered = (p / max(viewSize, float2(1.0)) - float2(0.5)) * 2.0;
