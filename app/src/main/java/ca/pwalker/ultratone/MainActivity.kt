@@ -819,7 +819,6 @@ class MainActivity : ComponentActivity() {
         if (activeMode == ReferenceRenderer.Mode.NIGHT) {
             setNightCaptureActive(true)
             if (!nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) setNightCaptureProgress(1, 2)
-            else nightCaptureCaption.text = if (nightExtensionActive) "Combining frames · hold still" else "Flash capture · hold still"
         } else setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
