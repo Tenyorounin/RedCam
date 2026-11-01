@@ -55,8 +55,8 @@ object ReferenceRenderer {
                 // Estimate only a restrained illuminant correction from neutral,
                 // midtone pixels. Avoid letting saturated lamps dictate AWB.
                 if (mode == Mode.NIGHT && saturation < 0.18f && luma in 0.16f..0.78f && g > 0.025f) {
-                    neutralRedGreen += kotlin.math.ln((r / g).coerceIn(0.4f, 2.5f)).toDouble()
-                    neutralBlueGreen += kotlin.math.ln((b / g).coerceIn(0.4f, 2.5f)).toDouble()
+                    neutralRedGreen += kotlin.math.ln((r / g).coerceIn(0.4f, 2.5f).toDouble())
+                    neutralBlueGreen += kotlin.math.ln((b / g).coerceIn(0.4f, 2.5f).toDouble())
                     neutralSamples++
                 }
                 samples++
