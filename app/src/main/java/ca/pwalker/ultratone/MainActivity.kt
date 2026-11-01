@@ -552,6 +552,7 @@ class MainActivity : ComponentActivity() {
         else applyInfinityFocus(infinityFocusEnabled)
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
     private fun updateInfinityFocusSupport(cameraInfo: CameraInfo?) {
         infinityFocusSupported = false
         manualLensFocusSupported = false
