@@ -64,6 +64,7 @@ class MainActivity : ComponentActivity() {
     private var exposureRange = 0..0
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
+    private lateinit var photoProcessingExecutor: ExecutorService
     private val previewBitmapRetireHandler = Handler(Looper.getMainLooper())
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
@@ -114,6 +115,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
+        photoProcessingExecutor = Executors.newSingleThreadExecutor()
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -390,7 +392,7 @@ class MainActivity : ComponentActivity() {
             ReferenceRenderer.Mode.NIGHT -> ExtensionMode.NIGHT
             // Applying OEM bokeh before software depth estimation can erase depth cues
             // and leave a second blurred edge around the selected subject.
-            ReferenceRenderer.Mode.PORTRAIT -> null
+            ReferenceRenderer.Mode.CLOSE_UP -> null
         }
         var selector = baseSelector
         var usingExtension = false
@@ -449,7 +451,7 @@ class MainActivity : ComponentActivity() {
             cameraModeNote = when (activeMode) {
                 ReferenceRenderer.Mode.DAY -> "Day"
                 ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night · camera multi-frame" else "Night · two-frame merge"
-                ReferenceRenderer.Mode.PORTRAIT -> "Portrait · relative-depth blur"
+                ReferenceRenderer.Mode.CLOSE_UP -> "Close-up · relative-depth blur"
             }
             if (live) cameraModeNote += " · live look"
             if (!live) cameraModeNote += " · live effect unavailable"
@@ -508,11 +510,11 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         val now = System.nanoTime()
         val effect = liveCameraEffect
-        if (effect != null && mode != ReferenceRenderer.Mode.PORTRAIT) {
+        if (effect != null && mode != ReferenceRenderer.Mode.CLOSE_UP) {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.PORTRAIT) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -553,7 +555,7 @@ class MainActivity : ComponentActivity() {
                 oriented.recycle()
                 if (guide != null) {
                     runOnUiThread {
-                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.PORTRAIT) {
+                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP) {
                             effect.updateDepthGuide(guide)
                         } else if (!guide.isRecycled) guide.recycle()
                     }
@@ -564,7 +566,7 @@ class MainActivity : ComponentActivity() {
             styled = colorized
             oriented.recycle()
             var output: Bitmap = colorized
-            if (mode == ReferenceRenderer.Mode.PORTRAIT) {
+            if (mode == ReferenceRenderer.Mode.CLOSE_UP) {
                 val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
                 val focus = mapFocusToFrame(
                     focusX, focusY, previewView.width, previewView.height, colorized.width, colorized.height,
@@ -638,7 +640,7 @@ class MainActivity : ComponentActivity() {
     private fun selectMode(mode: ReferenceRenderer.Mode) {
         activeMode = mode
         updateLiveLook()
-        if (mode != ReferenceRenderer.Mode.PORTRAIT) {
+        if (mode != ReferenceRenderer.Mode.CLOSE_UP) {
             analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         }
         updateModeButtons()
@@ -703,7 +705,9 @@ class MainActivity : ComponentActivity() {
                         message("Night capture failed; try again with the phone steadier.")
                         updateStatus()
                     } else {
-                        processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                        photoProcessingExecutor.execute {
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                        }
                     }
                 } finally { files.forEach { it.delete() } }
             }
@@ -714,15 +718,17 @@ class MainActivity : ComponentActivity() {
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    try {
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeFile(file.absolutePath, bounds)
-                        val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
-                            ?: error("Could not decode captured image")
-                        processCapturedBitmap(orient(bitmap, file), zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
-                    } catch (e: Exception) {
-                        runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
-                    } finally { file.delete() }
+                    photoProcessingExecutor.execute {
+                        try {
+                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                            BitmapFactory.decodeFile(file.absolutePath, bounds)
+                            val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
+                                ?: error("Could not decode captured image")
+                            processCapturedBitmap(orient(bitmap, file), zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                        } catch (e: Exception) {
+                            runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
+                        } finally { file.delete() }
+                    }
                 }
                 override fun onError(error: ImageCaptureException) {
                     runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Capture failed: ${error.message ?: "camera error"}"); updateStatus() }
@@ -758,7 +764,7 @@ class MainActivity : ComponentActivity() {
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish
     ) {
-        runOnUiThread { status.text = "Processing photo…" }
+        runOnUiThread { status.text = "Applying look…" }
         var style: Bitmap? = null
         var final: Bitmap? = null
         try {
@@ -768,7 +774,7 @@ class MainActivity : ComponentActivity() {
                 focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
-            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try {
+            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP) (try {
                 PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
@@ -781,11 +787,12 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 isBusy = false
                 shutterButton.isEnabled = true
-                status.text = if (savedPortrait?.usedDepth == true) "Saved · depth-aware portrait blur" else "Saved to Pictures/UltraTone"
+                status.text = if (savedPortrait?.usedDepth == true) "Saved · close-up depth blur" else "Saved to Pictures/UltraTone"
                 updateThumbnail(rendered)
-                message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
-                    "Saved; portrait blur could not detect usable depth or a person" else "Photo processed and saved")
+                message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
+                    "Saved; close-up blur could not detect usable depth or a person" else "Photo processed and saved")
                 rendered.recycle()
+                status.postDelayed({ if (!isBusy && previewView.visibility == View.VISIBLE) updateStatus() }, 2500L)
             }
         } catch (e: Exception) {
             final?.takeIf { it !== style }?.recycle()
@@ -805,7 +812,7 @@ class MainActivity : ComponentActivity() {
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("Could not create photo in gallery")
         contentResolver.openOutputStream(uri).use { stream ->
-            if (stream == null || !bitmap.compress(Bitmap.CompressFormat.JPEG, 96, stream)) error("Photo encoding failed")
+            if (stream == null || !bitmap.compress(Bitmap.CompressFormat.JPEG, 93, stream)) error("Photo encoding failed")
         }
         return uri
     }
@@ -851,7 +858,7 @@ class MainActivity : ComponentActivity() {
                     focusX, focusY, processedPreviewView.width, processedPreviewView.height,
                     source.width, source.height, false
                 )
-                val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) (try {
+                val portrait = if (mode == ReferenceRenderer.Mode.CLOSE_UP) (try {
                     PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
                 } catch (_: Exception) { null }) else null
                 val output = portrait?.bitmap ?: styled
@@ -860,7 +867,7 @@ class MainActivity : ComponentActivity() {
                     renderedBitmap?.recycle()
                     renderedBitmap = output
                     imageView.setImageBitmap(output)
-                    status.text = if (portrait?.usedDepth == true) "Portrait · relative-depth preview" else "${modeName(mode)} look preview"
+                    status.text = if (portrait?.usedDepth == true) "Close-up · relative-depth preview" else "${modeName(mode)} look preview"
                 }
             } catch (e: Exception) { runOnUiThread { message("Processing failed: ${e.localizedMessage ?: "not enough memory"}") } }
         }
@@ -970,7 +977,7 @@ class MainActivity : ComponentActivity() {
     private fun modeName(mode: ReferenceRenderer.Mode) = when (mode) {
         ReferenceRenderer.Mode.DAY -> "Day"
         ReferenceRenderer.Mode.NIGHT -> "Night"
-        ReferenceRenderer.Mode.PORTRAIT -> "Portrait"
+        ReferenceRenderer.Mode.CLOSE_UP -> "Close-up"
     }
     private fun message(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
 
@@ -980,6 +987,7 @@ class MainActivity : ComponentActivity() {
         liveCameraEffect?.close()
         liveCameraEffect = null
         cameraExecutor.shutdown()
+        photoProcessingExecutor.shutdown()
         analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         analysisExecutor.shutdown()
         sourceBitmap?.recycle()
