@@ -150,7 +150,7 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
     }
 
     private fun updateSliderGeometry() {
-        if (!::track.isInitialized || !::slider.isInitialized) return
+        if (!::track.isInitialized) return
         if (verticalLayout && track.width > 0 && track.height > 0) {
             slider.rotation = -90f
             val wantedWidth = track.height
