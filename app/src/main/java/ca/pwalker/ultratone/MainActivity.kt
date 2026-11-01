@@ -26,7 +26,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -46,9 +45,10 @@ import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.Observer
-import java.io.File
 import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.concurrent.ExecutorService
@@ -94,11 +94,11 @@ class MainActivity : ComponentActivity() {
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var nightExtensionActive = false
     private var isBusy = false
-    // Keep at most three disk-backed captures outstanding (one processing and
-    // up to two waiting). Full-resolution bitmaps stay on the single worker.
+    // Keep at most three captures outstanding (one processing and up to two waiting).
     private var pendingPhotoCount = 0
     private val maxPendingPhotos = 3
-    private var cameraModeNote = ""
+    private var statusMessageGeneration = 0
+    private var compactControls = false
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
     private val zoomButtons = mutableMapOf<Float, TextView>()
@@ -107,6 +107,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
     private lateinit var zoomRow: LinearLayout
+    private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
     private lateinit var finishRow: LinearLayout
     private lateinit var captureControls: LinearLayout
@@ -168,12 +169,13 @@ class MainActivity : ComponentActivity() {
         flashButton = pill("⚡ Off") { cycleFlash() }
         top.addView(flashButton, LinearLayout.LayoutParams(dp(86), dp(42)))
         status = TextView(this).apply {
-            text = "UltraTone"
             textSize = 14f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             setPadding(dp(12), dp(7), dp(12), dp(7))
-            background = rounded(0x99000000.toInt(), 24)
+            background = rounded(0xcc111216.toInt(), 24)
+            visibility = View.GONE
+            maxLines = 2
         }
         top.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginStart = dp(12); marginEnd = dp(12)
@@ -182,12 +184,13 @@ class MainActivity : ComponentActivity() {
         overlay.addView(top)
         overlay.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
 
-        val bottom = LinearLayout(this).apply {
+        bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             background = rounded(0xee111216.toInt(), 24)
             setPadding(dp(12), dp(12), dp(12), dp(10))
         }
+        val bottom = bottomPanel
         zoomRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         bottom.addView(zoomRow)
 
@@ -329,10 +332,16 @@ class MainActivity : ComponentActivity() {
         bottom.addView(editControls)
         overlay.addView(bottom)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            overlay.setPadding(bars.left + dp(16), bars.top + dp(12), bars.right + dp(16), bars.bottom + dp(16))
+            insets
+        }
         updateModeButtons()
         updateFinishButtons()
         attachPreviewGestures()
         setContentView(root)
+        ViewCompat.requestApplyInsets(root)
     }
 
     private fun attachPreviewGestures() {
@@ -486,13 +495,6 @@ class MainActivity : ComponentActivity() {
             configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
-            cameraModeNote = when (activeMode) {
-                ReferenceRenderer.Mode.DAY -> "Day"
-                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night · device camera extension" else "Night · two-frame fallback"
-                ReferenceRenderer.Mode.CLOSE_UP -> "Close-up · relative-depth blur"
-            }
-            if (live || liveCameraEffect != null) cameraModeNote += " · live look"
-            if (!live && liveCameraEffect == null) cameraModeNote += " · live effect unavailable"
             flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
             previewView.visibility = View.VISIBLE
             processedPreviewView.visibility = View.GONE
@@ -764,7 +766,45 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun applyControlSizing() {
+        if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
+        compactControls = activeMode == ReferenceRenderer.Mode.CLOSE_UP
+        val compact = compactControls
+        bottomPanel.setPadding(dp(if (compact) 8 else 12), dp(if (compact) 8 else 12),
+            dp(if (compact) 8 else 12), dp(if (compact) 6 else 10))
+        modeRow.setPadding(0, dp(if (compact) 2 else 8), 0, dp(if (compact) 2 else 6))
+        modeButtons.values.forEach { it.setPadding(dp(if (compact) 10 else 16), dp(if (compact) 5 else 9),
+            dp(if (compact) 10 else 16), dp(if (compact) 5 else 9)) }
+        finishRow.setPadding(0, 0, 0, dp(if (compact) 2 else 6))
+        finishButtons.values.forEach { button ->
+            val lp = button.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
+            lp.width = dp(if (compact) 96 else 112)
+            lp.height = dp(if (compact) 32 else 36)
+            button.layoutParams = lp
+        }
+        zoomRow.childrenAsViews().forEach { view ->
+            val lp = view.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
+            lp.height = dp(if (compact) 32 else 38)
+            view.layoutParams = lp
+        }
+        captureControls.setPadding(0, dp(if (compact) 2 else 6), 0, 0)
+        resizeControl(thumbnailButton, if (compact) 42 else 52, if (compact) 42 else 52)
+        resizeControl(shutterButton, if (compact) 60 else 70, if (compact) 60 else 70)
+        val more = captureControls.getChildAt(captureControls.childCount - 1)
+        resizeControl(more, if (compact) 58 else 64, if (compact) 38 else 44)
+    }
+
+    private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {
+        val lp = view?.layoutParams as? LinearLayout.LayoutParams ?: return
+        lp.width = dp(widthDp)
+        lp.height = dp(heightDp)
+        view.layoutParams = lp
+    }
+
+    private fun LinearLayout.childrenAsViews(): List<View> = (0 until childCount).map(::getChildAt)
+
     private fun updateModeButtons() {
+        applyControlSizing()
         modeButtons.forEach { (mode, button) ->
             val selected = mode == activeMode
             button.setTextColor(if (selected) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
@@ -783,7 +823,7 @@ class MainActivity : ComponentActivity() {
         isBusy = true
         pendingPhotoCount++
         shutterButton.isEnabled = false
-        status.text = "Taking photo…"
+        setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
         val focusYAtCapture = focusY
@@ -792,7 +832,7 @@ class MainActivity : ComponentActivity() {
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive) {
-            status.text = "Taking night frames…"
+            setStatusMessage("Taking night frames…")
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
                     runOnUiThread {
@@ -826,43 +866,68 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        val file = File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
-        capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    runOnUiThread {
-                        isBusy = false
-                        refreshShutterAvailability()
-                        showQueueStatus()
-                    }
-                    photoProcessingExecutor.execute {
-                        try {
-                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            BitmapFactory.decodeFile(file.absolutePath, bounds)
-                            val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
-                                ?: error("Could not decode captured image")
-                            processCapturedBitmap(orient(bitmap, file), zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
-                        } catch (e: Exception) {
-                            runOnUiThread {
-                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
-                                refreshShutterAvailability()
-                                message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}")
-                                updateStatus()
-                            }
-                        } finally { file.delete() }
-                    }
-                }
-                override fun onError(error: ImageCaptureException) {
+        capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureStarted() {
+                runOnUiThread { setStatusMessage("Taking photo…") }
+            }
+
+            override fun onCaptureProcessProgressed(progress: Int) {
+                runOnUiThread { setStatusMessage("Taking photo · $progress%") }
+            }
+
+            override fun onCaptureSuccess(image: ImageProxy) {
+                val jpeg = try {
+                    check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
+                    val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
+                    ByteArray(buffer.remaining()).also { buffer.get(it) }
+                } catch (e: Exception) {
+                    image.close()
                     runOnUiThread {
                         isBusy = false
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
-                        message("Capture failed: ${error.message ?: "camera error"}")
+                        message("Capture failed: ${e.localizedMessage ?: "camera error"}")
                         updateStatus()
                     }
-                    file.delete()
+                    return
                 }
-            })
+                val rotation = image.imageInfo.rotationDegrees
+                image.close()
+                runOnUiThread {
+                    isBusy = false
+                    refreshShutterAvailability()
+                    setStatusMessage("Processing photo…")
+                    showQueueStatus()
+                }
+                photoProcessingExecutor.execute {
+                    try {
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+                        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
+                            decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image")
+                        processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                            refreshShutterAvailability()
+                            message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                            updateStatus()
+                        }
+                    }
+                }
+            }
+
+            override fun onError(error: ImageCaptureException) {
+                runOnUiThread {
+                    isBusy = false
+                    pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                    refreshShutterAvailability()
+                    message("Capture failed: ${error.message ?: "camera error"}")
+                    updateStatus()
+                }
+            }
+        })
     }
 
     private fun captureNightFrames(
@@ -893,7 +958,7 @@ class MainActivity : ComponentActivity() {
                     }
                     frames += nextFrame
                     if (index + 1 < 2) {
-                        runOnUiThread { status.text = "Taking night frames (${index + 2}/2)…" }
+                        runOnUiThread { setStatusMessage("Taking night frame ${index + 2} of 2…") }
                     }
                     captureNightFrames(capture, frames, index + 1, onComplete)
                 }
@@ -911,7 +976,7 @@ class MainActivity : ComponentActivity() {
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish
     ) {
-        runOnUiThread { status.text = "Applying look…" }
+        runOnUiThread { setStatusMessage("Applying look…") }
         var style: Bitmap? = null
         var final: Bitmap? = null
         try {
@@ -926,7 +991,7 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
-            runOnUiThread { status.text = "Saving photo…" }
+            runOnUiThread { setStatusMessage("Saving photo…") }
             val uri = saveBitmap(rendered)
             lastPhotoUri = uri
             val savedPortrait = portrait
@@ -934,12 +999,12 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                 refreshShutterAvailability()
-                status.text = if (pendingPhotoCount > 0) "Saved · ${pendingPhotoCount} photo(s) still processing" else if (savedPortrait?.usedDepth == true) "Saved · close-up depth blur" else "Saved to Pictures/UltraTone"
                 updateThumbnail(rendered)
                 message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
-                    "Saved; close-up blur could not detect usable depth or a person" else "Photo processed and saved")
+                    "Saved; close-up blur could not detect usable depth or a person" else if (pendingPhotoCount > 0)
+                    "Photo saved; processing the next photo" else "Photo saved to Pictures/UltraTone")
                 rendered.recycle()
-                status.postDelayed({ if (!isBusy && pendingPhotoCount == 0 && previewView.visibility == View.VISIBLE) updateStatus() }, 2500L)
+                updateStatus()
             }
         } catch (e: Exception) {
             final?.takeIf { it !== style }?.recycle()
@@ -975,7 +1040,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun loadUri(uri: Uri) {
-        status.text = "Opening photo…"
+        setStatusMessage("Opening photo…")
         cameraExecutor.execute {
             try {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1019,7 +1084,7 @@ class MainActivity : ComponentActivity() {
                     renderedBitmap?.recycle()
                     renderedBitmap = output
                     imageView.setImageBitmap(output)
-                    status.text = if (portrait?.usedDepth == true) "Close-up · relative-depth preview" else "${modeName(mode)} look preview"
+                    status.visibility = View.GONE
                 }
             } catch (e: Exception) { runOnUiThread { message("Processing failed: ${e.localizedMessage ?: "not enough memory"}") } }
         }
@@ -1084,11 +1149,6 @@ class MainActivity : ComponentActivity() {
         return mappedX to mappedY
     }
 
-    private fun orient(bitmap: Bitmap, file: File): Bitmap = try {
-        val exif = ExifInterface(file)
-        rotate(bitmap, exif.rotationDegrees)
-    } catch (_: Exception) { bitmap }
-
     private fun orient(bitmap: Bitmap, uri: Uri): Bitmap = try {
         contentResolver.openInputStream(uri).use { rotate(bitmap, ExifInterface(it!!).rotationDegrees) }
     } catch (_: Exception) { bitmap }
@@ -1099,12 +1159,21 @@ class MainActivity : ComponentActivity() {
         return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true).also { if (it !== bitmap) bitmap.recycle() }
     }
 
-    private fun updateStatus() {
-        if (!isBusy && pendingPhotoCount == 0) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"} · ${strength.progress}%"
+    private fun setStatusMessage(text: String, hideAfterMs: Long? = null) {
+        val generation = ++statusMessageGeneration
+        status.text = text
+        status.visibility = View.VISIBLE
+        if (hideAfterMs != null) status.postDelayed({
+            if (generation == statusMessageGeneration && !isBusy && pendingPhotoCount == 0) status.visibility = View.GONE
+        }, hideAfterMs)
     }
 
+    // The top pill is reserved for short-lived capture and save feedback.
+    // Mode and finish selection are shown by their controls, so there is no idle status text.
+    private fun updateStatus() = Unit
+
     private fun showQueueStatus() {
-        if (pendingPhotoCount > 0) status.text = "Processing photos · $pendingPhotoCount queued"
+        if (pendingPhotoCount > 0) setStatusMessage("Processing photos · $pendingPhotoCount queued")
     }
 
     private fun refreshShutterAvailability() {
@@ -1137,7 +1206,7 @@ class MainActivity : ComponentActivity() {
         ReferenceRenderer.Mode.NIGHT -> "Night"
         ReferenceRenderer.Mode.CLOSE_UP -> "Close-up"
     }
-    private fun message(text: String) = Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
+    private fun message(text: String) = setStatusMessage(text, 2_800L)
 
     override fun onDestroy() {
         super.onDestroy()
