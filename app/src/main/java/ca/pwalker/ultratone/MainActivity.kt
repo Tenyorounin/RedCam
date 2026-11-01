@@ -2,6 +2,7 @@ package ca.pwalker.ultratone
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -196,11 +197,19 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(6), 0, 0)
         }
         thumbnailButton = ImageButton(this).apply {
-            contentDescription = "Choose a photo to process"
+            contentDescription = "Open the last photo; long press to choose a photo"
             background = rounded(0xff33353a.toInt(), 12)
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageResource(android.R.drawable.ic_menu_gallery)
-            setOnClickListener { choosePhoto.launch("image/*") }
+            setOnClickListener {
+                val uri = lastPhotoUri
+                if (uri == null) choosePhoto.launch("image/*")
+                else try {
+                    startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/*")
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                } catch (_: Exception) { choosePhoto.launch("image/*") }
+            }
+            setOnLongClickListener { choosePhoto.launch("image/*"); true }
         }
         captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(52), dp(52)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
@@ -304,6 +313,7 @@ class MainActivity : ComponentActivity() {
             provider.unbindAll()
             imageCapture = capture
             boundCamera = provider.bindToLifecycle(this, selector, preview, capture)
+            flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
             previewView.visibility = View.VISIBLE
             imageView.visibility = View.GONE
             zoomRow.visibility = View.VISIBLE
@@ -320,6 +330,7 @@ class MainActivity : ComponentActivity() {
                     provider.unbindAll()
                     imageCapture = capture
                     boundCamera = provider.bindToLifecycle(this, baseSelector, preview, capture)
+                    flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
                     cameraModeNote = when (activeMode) {
                         ReferenceRenderer.Mode.PORTRAIT -> "Portrait · AI background blur"
                         ReferenceRenderer.Mode.NIGHT -> "Night · single-frame processing"
@@ -399,6 +410,8 @@ class MainActivity : ComponentActivity() {
         status.text = "Taking photo…"
         val file = File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
         val zoom = currentZoomRatio
+        val modeAtCapture = activeMode
+        val strengthAtCapture = styleStrength
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
@@ -408,8 +421,8 @@ class MainActivity : ComponentActivity() {
                         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
                             ?: error("Could not decode captured image")
                         val upright = orient(bitmap, file)
-                        val style = ReferenceRenderer.render(upright, styleStrength, activeMode, zoom)
-                        val portrait = if (activeMode == ReferenceRenderer.Mode.PORTRAIT) PortraitBlur.apply(style) else null
+                        val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom)
+                        val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try { PortraitBlur.apply(style) } catch (_: Exception) { null }) else null
                         val final = portrait?.bitmap ?: style
                         upright.recycle()
                         if (final !== style) style.recycle()
@@ -419,10 +432,10 @@ class MainActivity : ComponentActivity() {
                             shutterButton.isEnabled = true
                             status.text = if (portrait?.subjectDetected == true) "Saved · portrait blur applied" else "Saved to Pictures/UltraTone"
                             updateThumbnail(final)
-                            message(if (activeMode == ReferenceRenderer.Mode.PORTRAIT && portrait?.subjectDetected != true)
-                                "Saved; person not detected, so blur was skipped" else "Photo processed and saved")
+                            message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && portrait?.subjectDetected != true)
+                                "Saved; portrait blur was skipped because no person was isolated" else "Photo processed and saved")
+                            final.recycle()
                         }
-                        final.recycle()
                         lastPhotoUri = uri
                     } catch (e: Exception) {
                         runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
@@ -484,7 +497,7 @@ class MainActivity : ComponentActivity() {
         cameraExecutor.execute {
             try {
                 val styled = ReferenceRenderer.render(source, styleStrength, mode)
-                val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) PortraitBlur.apply(styled) else null
+                val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) (try { PortraitBlur.apply(styled) } catch (_: Exception) { null }) else null
                 val output = portrait?.bitmap ?: styled
                 if (output !== styled) styled.recycle()
                 runOnUiThread {
@@ -504,9 +517,8 @@ class MainActivity : ComponentActivity() {
             try {
                 val uri = saveBitmap(copy)
                 lastPhotoUri = uri
-                runOnUiThread { updateThumbnail(copy); message("Saved to Pictures/UltraTone") }
-            } catch (e: Exception) { runOnUiThread { message("Save failed: ${e.localizedMessage ?: "storage error"}") } }
-            finally { copy.recycle() }
+                runOnUiThread { updateThumbnail(copy); message("Saved to Pictures/UltraTone"); copy.recycle() }
+            } catch (e: Exception) { copy.recycle(); runOnUiThread { message("Save failed: ${e.localizedMessage ?: "storage error"}") } }
         }
     }
 
