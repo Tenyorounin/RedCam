@@ -27,6 +27,7 @@ object ReferenceRenderer {
         val width = source.width
         val height = source.height
         val row = IntArray(width)
+        val outputRow = IntArray(width)
         val histogram = IntArray(256)
         var saturationTotal = 0.0
         var neutralRedGreen = 0.0
@@ -138,7 +139,7 @@ object ReferenceRenderer {
                         .coerceIn(0f, 1f)
                     val value = luma + (mono - luma) * amount
                     val grey = toByte(value)
-                    row[x] = Color.argb(alpha, grey, grey, grey)
+                    outputRow[x] = Color.argb(alpha, grey, grey, grey)
                     continue
                 }
 
@@ -172,9 +173,9 @@ object ReferenceRenderer {
                 nr += (0.006f * highlightWeight - 0.003f * shadowWeight) * amount * whiteBalanceScale
                 ng += (0.001f * highlightWeight) * amount * whiteBalanceScale
                 nb += (-0.005f * highlightWeight + 0.004f * shadowWeight) * amount * whiteBalanceScale
-                row[x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
+                outputRow[x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
             }
-            out.setPixels(row, 0, width, 0, y, width, 1)
+            out.setPixels(outputRow, 0, width, 0, y, width, 1)
         }
         return out
     }

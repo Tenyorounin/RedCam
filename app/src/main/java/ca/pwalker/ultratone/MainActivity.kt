@@ -11,6 +11,8 @@ import android.graphics.Matrix
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.util.Size
 import android.view.Gravity
@@ -62,6 +64,7 @@ class MainActivity : ComponentActivity() {
     private var exposureRange = 0..0
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
+    private val previewBitmapRetireHandler = Handler(Looper.getMainLooper())
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var cameraProvider: ProcessCameraProvider? = null
@@ -399,7 +402,7 @@ class MainActivity : ComponentActivity() {
             val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(flashMode).build()
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(640, 480))
+                .setTargetResolution(Size(480, 360))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
@@ -449,7 +452,8 @@ class MainActivity : ComponentActivity() {
             zoomRow.visibility = View.VISIBLE
             captureControls.visibility = View.VISIBLE
             editControls.visibility = View.GONE
-            processedPreviewBitmap?.recycle()
+            processedPreviewView.setImageDrawable(null)
+            retirePreviewBitmap(processedPreviewBitmap)
             processedPreviewBitmap = null
             observeZoom()
             updateStatus()
@@ -494,7 +498,7 @@ class MainActivity : ComponentActivity() {
     private fun processPreviewFrame(proxy: ImageProxy) {
         val mode = activeMode
         val now = System.nanoTime()
-        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 1_000_000_000L else 120_000_000L
+        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval) {
             proxy.close()
             return
@@ -552,12 +556,12 @@ class MainActivity : ComponentActivity() {
             }
             val display = output
             runOnUiThread {
-                if (previewView.visibility == View.VISIBLE) {
+                if (!isDestroyed && previewView.visibility == View.VISIBLE && mode == activeMode) {
                     val old = processedPreviewBitmap
                     processedPreviewBitmap = display
                     processedPreviewView.setImageBitmap(display)
                     processedPreviewView.visibility = View.VISIBLE
-                    old?.takeIf { it !== display && !it.isRecycled }?.recycle()
+                    if (old !== display) retirePreviewBitmap(old)
                 } else if (!display.isRecycled) display.recycle()
             }
             if (output === colorized) styled = null
@@ -833,12 +837,23 @@ class MainActivity : ComponentActivity() {
         renderedBitmap?.recycle(); renderedBitmap = null
         imageView.setImageDrawable(null)
         imageView.visibility = View.GONE
+        processedPreviewView.setImageDrawable(null)
         processedPreviewView.visibility = View.GONE
+        retirePreviewBitmap(processedPreviewBitmap)
+        processedPreviewBitmap = null
         previewView.visibility = View.VISIBLE
         zoomRow.visibility = View.VISIBLE
         captureControls.visibility = View.VISIBLE
         editControls.visibility = View.GONE
         if (cameraProvider != null) bindCamera()
+    }
+
+    /** Let the render thread finish any queued draw before releasing an old preview bitmap. */
+    private fun retirePreviewBitmap(bitmap: Bitmap?) {
+        if (bitmap == null || bitmap.isRecycled) return
+        previewBitmapRetireHandler.postDelayed({
+            if (bitmap !== processedPreviewBitmap && !bitmap.isRecycled) bitmap.recycle()
+        }, 1_200L)
     }
 
     private fun decodeOptions(width: Int, height: Int): BitmapFactory.Options {
@@ -921,6 +936,8 @@ class MainActivity : ComponentActivity() {
         analysisExecutor.shutdown()
         sourceBitmap?.recycle()
         renderedBitmap?.recycle()
-        processedPreviewBitmap?.recycle()
+        processedPreviewView.setImageDrawable(null)
+        retirePreviewBitmap(processedPreviewBitmap)
+        processedPreviewBitmap = null
     }
 }
