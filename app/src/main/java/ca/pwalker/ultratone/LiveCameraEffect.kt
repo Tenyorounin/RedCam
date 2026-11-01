@@ -21,6 +21,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private var focusX = 0.5f
     private var focusY = 0.5f
     private var hasFreshDepthGuide = false
+    private var infinityFocus = false
 
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
@@ -37,12 +38,14 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
 
-    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false) {
+    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false) {
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
         }
         this.mode = mode
+        this.infinityFocus = infinityFocus
+        if (infinityFocus) hasFreshDepthGuide = false
         shader.setIntUniform("mode", when (mode) {
             ReferenceRenderer.Mode.DAY -> 0
             ReferenceRenderer.Mode.NIGHT -> 1
@@ -52,7 +55,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("nightEnhancement", if (nightEnhancement && mode == ReferenceRenderer.Mode.NIGHT) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))
         shader.setFloatUniform("zoomRatio", zoom.coerceAtLeast(1f))
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide) 1 else 0)
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide && !infinityFocus) 1 else 0)
         updateSize()
         // Re-attach after changing RuntimeShader uniforms so PreviewView's
         // hardware layer redraws immediately (not on a later camera rebind).
