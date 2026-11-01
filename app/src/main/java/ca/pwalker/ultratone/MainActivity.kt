@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -24,6 +25,7 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -50,7 +52,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.Observer
 import java.nio.ByteBuffer
-import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -98,15 +99,14 @@ class MainActivity : ComponentActivity() {
     private var pendingPhotoCount = 0
     private val maxPendingPhotos = 3
     private var statusMessageGeneration = 0
-    private var compactControls = false
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
-    private val zoomButtons = mutableMapOf<Float, TextView>()
-    private data class ZoomStop(val ratio: Float, val label: String, val description: String)
     private lateinit var flashButton: TextView
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
-    private lateinit var zoomRow: LinearLayout
+    private lateinit var zoomRow: LensZoomControl
+    private lateinit var nightCaptureIndicator: LinearLayout
+    private lateinit var nightCaptureCaption: TextView
     private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
     private lateinit var finishRow: LinearLayout
@@ -138,36 +138,40 @@ class MainActivity : ComponentActivity() {
             // preview, making 1x look close to 2x while saved JPEGs stayed wide.
             scaleType = PreviewView.ScaleType.FIT_CENTER
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            translationY = -dp(42).toFloat()
             contentDescription = "Live camera viewfinder. Tap to focus; pinch to zoom."
         }
         liveCameraEffect = LiveCameraEffect.attach(previewView)
         imageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
+            translationY = -dp(42).toFloat()
             visibility = View.GONE
             contentDescription = "Selected photo preview"
         }
         processedPreviewView = ImageView(this).apply {
             // Keep the processed fallback preview framed like the saved full frame.
             scaleType = ImageView.ScaleType.FIT_CENTER
+            translationY = -dp(42).toFloat()
             visibility = View.GONE
             contentDescription = "Live viewfinder with selected photo processing"
         }
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(processedPreviewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(imageView, FrameLayout.LayoutParams(-1, -1))
+        buildNightCaptureIndicator(root)
         previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
         updateLiveLook()
 
         val overlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(16))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         flashButton = pill("⚡ Off") { cycleFlash() }
-        top.addView(flashButton, LinearLayout.LayoutParams(dp(86), dp(42)))
+        top.addView(flashButton, LinearLayout.LayoutParams(dp(76), dp(36)))
         status = TextView(this).apply {
             textSize = 14f
             gravity = Gravity.CENTER
@@ -180,31 +184,35 @@ class MainActivity : ComponentActivity() {
         top.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginStart = dp(12); marginEnd = dp(12)
         })
-        top.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(50), dp(42)))
+        top.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(42), dp(36)))
         overlay.addView(top)
+        zoomRow = LensZoomControl(this).apply {
+            onZoomChanged = ::selectZoom
+            contentDescription = "Camera zoom slider. Yellow marks show lens changes."
+        }
+        overlay.addView(zoomRow, LinearLayout.LayoutParams(-1, dp(38)).apply {
+            topMargin = dp(8)
+        })
         overlay.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
 
         bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             background = rounded(0xee111216.toInt(), 24)
-            setPadding(dp(12), dp(12), dp(12), dp(10))
+            setPadding(dp(8), dp(7), dp(8), dp(6))
         }
         val bottom = bottomPanel
-        zoomRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        bottom.addView(zoomRow)
-
         modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, dp(8), 0, dp(6))
+            setPadding(0, dp(2), 0, dp(2))
         }
         ReferenceRenderer.Mode.values().forEach { mode ->
             val item = TextView(this).apply {
                 text = modeName(mode)
                 textSize = 14f
                 gravity = Gravity.CENTER
-                setPadding(dp(16), dp(9), dp(16), dp(9))
+                setPadding(dp(10), dp(4), dp(10), dp(4))
                 setTextColor(Color.WHITE)
                 setOnClickListener { selectMode(mode) }
                 contentDescription = "${modeName(mode)} photo mode"
@@ -217,13 +225,13 @@ class MainActivity : ComponentActivity() {
         finishRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 0, 0, dp(6))
+            setPadding(0, 0, 0, dp(2))
         }
         ReferenceRenderer.Finish.values().forEach { finish ->
             val label = if (finish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"
             val item = pill(label) { selectFinish(finish) }
             finishButtons[finish] = item
-            finishRow.addView(item, LinearLayout.LayoutParams(dp(112), dp(36)).apply {
+            finishRow.addView(item, LinearLayout.LayoutParams(dp(88), dp(30)).apply {
                 marginStart = dp(4); marginEnd = dp(4)
             })
         }
@@ -284,7 +292,7 @@ class MainActivity : ComponentActivity() {
         captureControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, 0)
+            setPadding(0, dp(2), 0, 0)
         }
         thumbnailButton = ImageButton(this).apply {
             contentDescription = "Open the last photo; long press to choose a photo"
@@ -301,7 +309,7 @@ class MainActivity : ComponentActivity() {
             }
             setOnLongClickListener { choosePhoto.launch("image/*"); true }
         }
-        captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(52), dp(52)))
+        captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(42), dp(42)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         shutterButton = ImageButton(this).apply {
             contentDescription = "Take photo with the selected ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} style"
@@ -309,16 +317,26 @@ class MainActivity : ComponentActivity() {
             setImageDrawable(null)
             setPadding(dp(6), dp(6), dp(6), dp(6))
             foreground = roundedStroke(0x00000000, Color.WHITE, 3, 50)
-            setOnClickListener { capture() }
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.88f).scaleY(0.88f).setDuration(75L).start()
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate().scaleX(1f).scaleY(1f).setDuration(130L).start()
+                }
+                false
+            }
+            setOnClickListener {
+                performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+                capture()
+            }
         }
-        captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(70), dp(70)))
+        captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(64), dp(64)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         captureControls.addView(pill("More") {
             val show = strengthRow.visibility != View.VISIBLE
             strengthRow.visibility = if (show) View.VISIBLE else View.GONE
             if (previewView.visibility == View.VISIBLE) updateExposureControl(show)
         },
-            LinearLayout.LayoutParams(dp(64), dp(44)))
+            LinearLayout.LayoutParams(dp(54), dp(36)))
         bottom.addView(captureControls)
 
         editControls = LinearLayout(this).apply {
@@ -334,7 +352,7 @@ class MainActivity : ComponentActivity() {
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            overlay.setPadding(bars.left + dp(16), bars.top + dp(12), bars.right + dp(16), bars.bottom + dp(16))
+            overlay.setPadding(bars.left + dp(12), bars.top + dp(8), bars.right + dp(12), bars.bottom + dp(8))
             insets
         }
         updateModeButtons()
@@ -342,6 +360,52 @@ class MainActivity : ComponentActivity() {
         attachPreviewGestures()
         setContentView(root)
         ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun buildNightCaptureIndicator(root: FrameLayout) {
+        nightCaptureIndicator = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(14), dp(16), dp(12))
+            background = rounded(0xdd111216.toInt(), 22)
+            visibility = View.GONE
+            elevation = dp(6).toFloat()
+        }
+        val spinner = ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(0xffffc857.toInt())
+        }
+        nightCaptureIndicator.addView(spinner, LinearLayout.LayoutParams(dp(40), dp(40)))
+        nightCaptureIndicator.addView(TextView(this).apply {
+            text = "Night capture"
+            textSize = 14f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(0xffffd46f.toInt())
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
+        })
+        nightCaptureCaption = TextView(this).apply {
+            text = "Combining frames · hold still"
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(3), 0, 0)
+        }
+        nightCaptureIndicator.addView(nightCaptureCaption)
+        root.addView(nightCaptureIndicator, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ).apply { topMargin = -dp(34) })
+    }
+
+    private fun setNightCaptureActive(active: Boolean) {
+        if (!::nightCaptureIndicator.isInitialized) return
+        nightCaptureIndicator.visibility = if (active) View.VISIBLE else View.GONE
+    }
+
+    private fun setNightCaptureProgress(frame: Int, total: Int) {
+        if (::nightCaptureCaption.isInitialized) {
+            nightCaptureCaption.text = "Frame $frame of $total · hold still"
+        }
     }
 
     private fun attachPreviewGestures() {
@@ -411,7 +475,7 @@ class MainActivity : ComponentActivity() {
         }
         var selector = baseSelector
         var usingExtension = false
-        if (extension != null && lensFacing == CameraSelector.LENS_FACING_BACK) {
+        if (extension != null && lensFacing == CameraSelector.LENS_FACING_BACK && flashMode == ImageCapture.FLASH_MODE_OFF) {
             try {
                 val manager = extensionsManager
                 if (manager != null && manager.isExtensionAvailable(baseSelector, extension)) {
@@ -495,7 +559,8 @@ class MainActivity : ComponentActivity() {
             configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
-            flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
+            val rearCameraHasFlash = try { provider.getCameraInfo(baseSelector).hasFlashUnit() } catch (_: Exception) { false }
+            flashButton.visibility = if (lensFacing == CameraSelector.LENS_FACING_BACK && rearCameraHasFlash) View.VISIBLE else View.INVISIBLE
             previewView.visibility = View.VISIBLE
             processedPreviewView.visibility = View.GONE
             imageView.visibility = View.GONE
@@ -518,73 +583,31 @@ class MainActivity : ComponentActivity() {
         val observer = Observer<ZoomState> { state ->
             if (state == null) return@Observer
             currentZoomRatio = state.zoomRatio
+            zoomRow.setZoomRatio(state.zoomRatio)
             updateLiveLook()
-            zoomButtons.forEach { (ratio, view) ->
-                val available = ratio >= state.minZoomRatio - 0.03f && ratio <= state.maxZoomRatio + 0.03f
-                view.visibility = if (available) View.VISIBLE else View.GONE
-                view.alpha = if (kotlin.math.abs(currentZoomRatio - ratio) < 0.12f) 1f else 0.68f
-            }
         }
         zoomObserver = observer
         camera.cameraInfo.zoomState.observe(this, observer)
     }
 
-    /** Build lens buttons from the camera capabilities Android exposes for this device. */
+    /** Map the actual logical-camera range and physical-lens ratios to the zoom slider. */
     private fun configureZoomStops(cameraInfo: androidx.camera.core.CameraInfo?) {
-        zoomRow.removeAllViews()
-        zoomButtons.clear()
-        if (cameraInfo == null) return
+        if (cameraInfo == null) {
+            zoomRow.setZoomRange(1f, 1f, emptyList())
+            return
+        }
         val physicalStops = try {
             cameraInfo.physicalCameraInfos.mapNotNull { info ->
                 info.intrinsicZoomRatio.takeIf { it.isFinite() && it > 0f }
             }
         } catch (_: Exception) { emptyList() }
-        val stops = mutableListOf<ZoomStop>()
-        physicalStops.forEach { ratio ->
-            if (stops.none { kotlin.math.abs(it.ratio - ratio) < 0.08f }) {
-                val label = when {
-                    ratio < 0.92f -> "${formatZoom(ratio)}× UW"
-                    ratio > 1.08f -> "${formatZoom(ratio)}× Tele"
-                    else -> "1×"
-                }
-                val description = when {
-                    ratio < 0.92f -> "Ultra-wide lens, approximately ${formatZoom(ratio)} times"
-                    ratio > 1.08f -> "Telephoto lens, approximately ${formatZoom(ratio)} times"
-                    else -> "Main camera lens, 1 times"
-                }
-                stops += ZoomStop(ratio, label, description)
-            }
-        }
-        if (stops.isEmpty()) {
-            // Some camera providers expose only a logical camera and no physical
-            // lens inventory. Offer only values supported by its reported range.
-            val state = cameraInfo.zoomState.value
-            if (state != null) {
-                val candidates = listOf(state.minZoomRatio, 1f, state.maxZoomRatio)
-                    .filter { it >= state.minZoomRatio - 0.02f && it <= state.maxZoomRatio + 0.02f }
-                    .distinctBy { (it * 20).toInt() }
-                    .sorted()
-                candidates.forEach { ratio ->
-                    if (stops.none { kotlin.math.abs(it.ratio - ratio) < 0.08f }) {
-                        stops += ZoomStop(ratio, "${formatZoom(ratio)}×", "Camera zoom ${formatZoom(ratio)} times")
-                    }
-                }
-            }
-        }
-        stops.sortedBy { it.ratio }.forEach { stop ->
-            val button = pill(stop.label) { selectZoom(stop.ratio) }.apply {
-                contentDescription = stop.description
-                textSize = 12f
-            }
-            zoomButtons[stop.ratio] = button
-            zoomRow.addView(button, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
-                marginStart = dp(3); marginEnd = dp(3)
-            })
-        }
+        val state = cameraInfo.zoomState.value
+        val min = state?.minZoomRatio ?: 1f
+        val max = state?.maxZoomRatio ?: min
+        zoomRow.setZoomRange(min, max, physicalStops)
+        currentZoomRatio = state?.zoomRatio ?: min
+        zoomRow.setZoomRatio(currentZoomRatio)
     }
-
-    private fun formatZoom(value: Float): String =
-        String.format(Locale.US, if (value % 1f == 0f) "%.0f" else "%.1f", value)
 
     private fun updateExposureControl(show: Boolean) {
         if (!show) { exposureRow.visibility = View.GONE; return }
@@ -768,30 +791,21 @@ class MainActivity : ComponentActivity() {
 
     private fun applyControlSizing() {
         if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
-        compactControls = activeMode == ReferenceRenderer.Mode.CLOSE_UP
-        val compact = compactControls
-        bottomPanel.setPadding(dp(if (compact) 8 else 12), dp(if (compact) 8 else 12),
-            dp(if (compact) 8 else 12), dp(if (compact) 6 else 10))
-        modeRow.setPadding(0, dp(if (compact) 2 else 8), 0, dp(if (compact) 2 else 6))
-        modeButtons.values.forEach { it.setPadding(dp(if (compact) 10 else 16), dp(if (compact) 5 else 9),
-            dp(if (compact) 10 else 16), dp(if (compact) 5 else 9)) }
-        finishRow.setPadding(0, 0, 0, dp(if (compact) 2 else 6))
+        bottomPanel.setPadding(dp(8), dp(7), dp(8), dp(6))
+        modeRow.setPadding(0, dp(2), 0, dp(2))
+        modeButtons.values.forEach { it.setPadding(dp(10), dp(4), dp(10), dp(4)) }
+        finishRow.setPadding(0, 0, 0, dp(2))
         finishButtons.values.forEach { button ->
             val lp = button.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
-            lp.width = dp(if (compact) 96 else 112)
-            lp.height = dp(if (compact) 32 else 36)
+            lp.width = dp(88)
+            lp.height = dp(30)
             button.layoutParams = lp
         }
-        zoomRow.childrenAsViews().forEach { view ->
-            val lp = view.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
-            lp.height = dp(if (compact) 32 else 38)
-            view.layoutParams = lp
-        }
-        captureControls.setPadding(0, dp(if (compact) 2 else 6), 0, 0)
-        resizeControl(thumbnailButton, if (compact) 42 else 52, if (compact) 42 else 52)
-        resizeControl(shutterButton, if (compact) 60 else 70, if (compact) 60 else 70)
+        captureControls.setPadding(0, dp(2), 0, 0)
+        resizeControl(thumbnailButton, 42, 42)
+        resizeControl(shutterButton, 64, 64)
         val more = captureControls.getChildAt(captureControls.childCount - 1)
-        resizeControl(more, if (compact) 58 else 64, if (compact) 38 else 44)
+        resizeControl(more, 54, 36)
     }
 
     private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {
@@ -800,8 +814,6 @@ class MainActivity : ComponentActivity() {
         lp.height = dp(heightDp)
         view.layoutParams = lp
     }
-
-    private fun LinearLayout.childrenAsViews(): List<View> = (0 until childCount).map(::getChildAt)
 
     private fun updateModeButtons() {
         applyControlSizing()
@@ -823,7 +835,11 @@ class MainActivity : ComponentActivity() {
         isBusy = true
         pendingPhotoCount++
         shutterButton.isEnabled = false
-        setStatusMessage("Taking photo…")
+        if (activeMode == ReferenceRenderer.Mode.NIGHT) {
+            setNightCaptureActive(true)
+            if (!nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) setNightCaptureProgress(1, 2)
+            else nightCaptureCaption.text = if (nightExtensionActive) "Combining frames · hold still" else "Flash capture · hold still"
+        } else setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
         val focusYAtCapture = focusY
@@ -831,12 +847,12 @@ class MainActivity : ComponentActivity() {
         val modeAtCapture = activeMode
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
-        if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive) {
-            setStatusMessage("Taking night frames…")
+        if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
                     runOnUiThread {
                         isBusy = false
+                        setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
                         message("Night capture failed; try again with the phone steadier.")
@@ -845,6 +861,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     runOnUiThread {
                         isBusy = false
+                        setNightCaptureActive(false)
                         refreshShutterAvailability()
                         showQueueStatus()
                     }
@@ -868,11 +885,15 @@ class MainActivity : ComponentActivity() {
 
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureStarted() {
-                runOnUiThread { setStatusMessage("Taking photo…") }
+                runOnUiThread {
+                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) setStatusMessage("Taking photo…")
+                }
             }
 
             override fun onCaptureProcessProgressed(progress: Int) {
-                runOnUiThread { setStatusMessage("Taking photo · $progress%") }
+                runOnUiThread {
+                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) setStatusMessage("Taking photo · $progress%")
+                }
             }
 
             override fun onCaptureSuccess(image: ImageProxy) {
@@ -884,6 +905,7 @@ class MainActivity : ComponentActivity() {
                     image.close()
                     runOnUiThread {
                         isBusy = false
+                        setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
                         message("Capture failed: ${e.localizedMessage ?: "camera error"}")
@@ -895,9 +917,12 @@ class MainActivity : ComponentActivity() {
                 image.close()
                 runOnUiThread {
                     isBusy = false
+                    setNightCaptureActive(false)
                     refreshShutterAvailability()
-                    setStatusMessage("Processing photo…")
-                    showQueueStatus()
+                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) {
+                        setStatusMessage("Processing photo…")
+                        showQueueStatus()
+                    }
                 }
                 photoProcessingExecutor.execute {
                     try {
@@ -921,6 +946,7 @@ class MainActivity : ComponentActivity() {
             override fun onError(error: ImageCaptureException) {
                 runOnUiThread {
                     isBusy = false
+                    setNightCaptureActive(false)
                     pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                     refreshShutterAvailability()
                     message("Capture failed: ${error.message ?: "camera error"}")
@@ -958,7 +984,7 @@ class MainActivity : ComponentActivity() {
                     }
                     frames += nextFrame
                     if (index + 1 < 2) {
-                        runOnUiThread { setStatusMessage("Taking night frame ${index + 2} of 2…") }
+                        runOnUiThread { setNightCaptureProgress(index + 2, 2) }
                     }
                     captureNightFrames(capture, frames, index + 1, onComplete)
                 }
@@ -976,7 +1002,6 @@ class MainActivity : ComponentActivity() {
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish
     ) {
-        runOnUiThread { setStatusMessage("Applying look…") }
         var style: Bitmap? = null
         var final: Bitmap? = null
         try {
