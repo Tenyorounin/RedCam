@@ -39,8 +39,8 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.5.1"
+        versionCode = 16
+        versionName = "0.5.2"
     }
 
     // Build the arm64 APK first. Other Android ABIs can be added after validating
