@@ -114,7 +114,7 @@ object PortraitBlur {
         }
         background.recycle()
         val peopleFound = subjectPixels > source.width * source.height / 100
-        return Result(output, true, true)
+        return Result(output, peopleFound, true)
     }
 
     /** People-only safety fallback for the rare case where depth model initialization fails. */

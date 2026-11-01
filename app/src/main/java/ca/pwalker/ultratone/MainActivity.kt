@@ -56,6 +56,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var status: TextView
     private lateinit var strength: SeekBar
     private lateinit var strengthRow: LinearLayout
+    private lateinit var exposureRow: LinearLayout
+    private lateinit var exposure: SeekBar
+    private lateinit var exposureLabel: TextView
+    private var exposureRange = 0..0
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var analysisExecutor: ExecutorService
     private var imageCapture: ImageCapture? = null
@@ -211,6 +215,35 @@ class MainActivity : ComponentActivity() {
         strengthRow.addView(strength, LinearLayout.LayoutParams(0, dp(36), 1f))
         bottom.addView(strengthRow)
 
+        exposureRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+        }
+        exposureLabel = TextView(this).apply {
+            text = "EV 0.0"
+            textSize = 12f
+            setTextColor(0xffd4d4d8.toInt())
+        }
+        exposureRow.addView(exposureLabel, LinearLayout.LayoutParams(dp(52), ViewGroup.LayoutParams.WRAP_CONTENT))
+        exposure = SeekBar(this).apply {
+            max = 20
+            progress = 10
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) {
+                    if (!fromUser || exposureRange.first > exposureRange.last) return
+                    val index = (exposureRange.first + value).coerceAtMost(exposureRange.last)
+                    val step = boundCamera?.cameraInfo?.exposureState?.exposureCompensationStep?.toFloat() ?: 0f
+                    exposureLabel.text = "EV ${"%.1f".format(index * step)}"
+                    boundCamera?.cameraControl?.setExposureCompensationIndex(index)
+                }
+                override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+            })
+        }
+        exposureRow.addView(exposure, LinearLayout.LayoutParams(0, dp(36), 1f))
+        bottom.addView(exposureRow)
+
         captureControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -243,7 +276,11 @@ class MainActivity : ComponentActivity() {
         }
         captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(70), dp(70)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-        captureControls.addView(pill("More") { strengthRow.visibility = if (strengthRow.visibility == View.VISIBLE) View.GONE else View.VISIBLE },
+        captureControls.addView(pill("More") {
+            val show = strengthRow.visibility != View.VISIBLE
+            strengthRow.visibility = if (show) View.VISIBLE else View.GONE
+            if (previewView.visibility == View.VISIBLE) updateExposureControl(show)
+        },
             LinearLayout.LayoutParams(dp(64), dp(44)))
         bottom.addView(captureControls)
 
@@ -402,6 +439,7 @@ class MainActivity : ComponentActivity() {
 
     private fun observeZoom() {
         val camera = boundCamera ?: return
+        updateExposureControl(exposureRow.visibility == View.VISIBLE)
         val observer = Observer<ZoomState> { state ->
             if (state == null) return@Observer
             currentZoomRatio = state.zoomRatio
@@ -413,6 +451,23 @@ class MainActivity : ComponentActivity() {
         }
         zoomObserver = observer
         camera.cameraInfo.zoomState.observe(this, observer)
+    }
+
+    private fun updateExposureControl(show: Boolean) {
+        if (!show) { exposureRow.visibility = View.GONE; return }
+        val state = boundCamera?.cameraInfo?.exposureState
+        val range = state?.exposureCompensationRange
+        if (range == null || range.lower >= range.upper) {
+            exposureRow.visibility = View.GONE
+            return
+        }
+        exposureRange = range.lower..range.upper
+        exposure.max = range.upper - range.lower
+        val current = state.exposureCompensationIndex.coerceIn(range.lower, range.upper)
+        exposure.progress = current - range.lower
+        val step = state.exposureCompensationStep.toFloat()
+        exposureLabel.text = "EV ${"%.1f".format(current * step)}"
+        exposureRow.visibility = View.VISIBLE
     }
 
     private fun processPreviewFrame(proxy: ImageProxy) {
@@ -459,7 +514,11 @@ class MainActivity : ComponentActivity() {
             var output: Bitmap = colorized
             if (mode == ReferenceRenderer.Mode.PORTRAIT) {
                 val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
-                val portrait = segmenter.apply(colorized, focusX, focusY)
+                val focus = mapFocusToFrame(
+                    focusX, focusY, previewView.width, previewView.height, colorized.width, colorized.height,
+                    lensFacing == CameraSelector.LENS_FACING_FRONT
+                )
+                val portrait = segmenter.apply(colorized, focus.first, focus.second)
                 output = portrait.bitmap
                 if (output !== colorized) colorized.recycle()
             } else {
@@ -542,6 +601,7 @@ class MainActivity : ComponentActivity() {
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
         val focusYAtCapture = focusY
+        val facingAtCapture = lensFacing
         val modeAtCapture = activeMode
         val strengthAtCapture = styleStrength
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
@@ -554,8 +614,12 @@ class MainActivity : ComponentActivity() {
                             ?: error("Could not decode captured image")
                         val upright = orient(bitmap, file)
                         val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom)
+                        val focus = mapFocusToFrame(
+                            focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
+                            upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
+                        )
                         val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try {
-                            PortraitBlur.apply(this@MainActivity, style, focusXAtCapture, focusYAtCapture)
+                            PortraitBlur.apply(this@MainActivity, style, focus.first, focus.second)
                         } catch (_: Exception) { null }) else null
                         val final = portrait?.bitmap ?: style
                         upright.recycle()
@@ -620,6 +684,7 @@ class MainActivity : ComponentActivity() {
                     captureControls.visibility = View.GONE
                     editControls.visibility = View.VISIBLE
                     strengthRow.visibility = View.VISIBLE
+                    exposureRow.visibility = View.GONE
                     renderImported(upright)
                 }
             } catch (e: Exception) { runOnUiThread { message("Could not open photo: ${e.localizedMessage ?: "unsupported file"}") } }
@@ -631,8 +696,12 @@ class MainActivity : ComponentActivity() {
         cameraExecutor.execute {
             try {
                 val styled = ReferenceRenderer.render(source, styleStrength, mode)
+                val focus = mapFocusToFrame(
+                    focusX, focusY, processedPreviewView.width, processedPreviewView.height,
+                    source.width, source.height, false
+                )
                 val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) (try {
-                    PortraitBlur.apply(this@MainActivity, styled, focusX, focusY)
+                    PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
                 } catch (_: Exception) { null }) else null
                 val output = portrait?.bitmap ?: styled
                 if (output !== styled) styled.recycle()
@@ -675,6 +744,26 @@ class MainActivity : ComponentActivity() {
         var sample = 1
         while (width / sample.toLong() * (height / sample.toLong()) > 16_000_000L) sample *= 2
         return BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
+    }
+
+    /** Undo PreviewView's FILL_CENTER crop when mapping a tap onto the captured frame. */
+    private fun mapFocusToFrame(
+        x: Float, y: Float, viewWidth: Int, viewHeight: Int,
+        frameWidth: Int, frameHeight: Int, mirrored: Boolean
+    ): Pair<Float, Float> {
+        val viewAspect = viewWidth.coerceAtLeast(1).toFloat() / viewHeight.coerceAtLeast(1)
+        val frameAspect = frameWidth.coerceAtLeast(1).toFloat() / frameHeight.coerceAtLeast(1)
+        var mappedX = x.coerceIn(0f, 1f)
+        var mappedY = y.coerceIn(0f, 1f)
+        if (frameAspect > viewAspect) {
+            val visibleFraction = viewAspect / frameAspect
+            mappedX = (0.5f + (mappedX - 0.5f) * visibleFraction).coerceIn(0f, 1f)
+        } else {
+            val visibleFraction = frameAspect / viewAspect
+            mappedY = (0.5f + (mappedY - 0.5f) * visibleFraction).coerceIn(0f, 1f)
+        }
+        if (mirrored) mappedX = 1f - mappedX
+        return mappedX to mappedY
     }
 
     private fun orient(bitmap: Bitmap, file: File): Bitmap = try {
