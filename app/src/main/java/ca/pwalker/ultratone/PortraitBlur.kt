@@ -5,6 +5,7 @@ import android.graphics.Color
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
+import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
@@ -20,11 +21,23 @@ object PortraitBlur {
             .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
             .build()
         val segmenter = Segmentation.getClient(options)
-        val mask = try {
-            Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS)
-        } finally {
-            segmenter.close()
-        }
+        return try { apply(source, segmenter) } finally { segmenter.close() }
+    }
+
+    /** Reuses ML Kit's temporal model for throttled live-view frames. */
+    class StreamProcessor : AutoCloseable {
+        private val segmenter = Segmentation.getClient(
+            SelfieSegmenterOptions.Builder()
+                .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
+                .build()
+        )
+
+        fun apply(source: Bitmap): Result = PortraitBlur.apply(source, segmenter)
+        override fun close() = segmenter.close()
+    }
+
+    private fun apply(source: Bitmap, segmenter: Segmenter): Result {
+        val mask = Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS)
 
         val maskWidth = mask.width
         val maskHeight = mask.height

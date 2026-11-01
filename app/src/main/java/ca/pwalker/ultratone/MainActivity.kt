@@ -12,6 +12,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Size
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -29,8 +30,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.camera.core.ZoomState
@@ -42,17 +45,21 @@ import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.Observer
 import java.io.File
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
+    private lateinit var processedPreviewView: ImageView
     private lateinit var imageView: ImageView
     private lateinit var status: TextView
     private lateinit var strength: SeekBar
     private lateinit var strengthRow: LinearLayout
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var analysisExecutor: ExecutorService
     private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var extensionsManager: ExtensionsManager? = null
     private var boundCamera: Camera? = null
@@ -60,10 +67,14 @@ class MainActivity : ComponentActivity() {
     private var sourceBitmap: Bitmap? = null
     private var renderedBitmap: Bitmap? = null
     private var lastPhotoUri: Uri? = null
-    private var styleStrength = 0.75f
+    private var processedPreviewBitmap: Bitmap? = null
+    private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
+    private var lastPreviewFrameNanos = 0L
+    private var livePreviewAvailable = false
+    @Volatile private var styleStrength = 0.75f
     private var currentZoomRatio = 1f
-    private var activeMode = ReferenceRenderer.Mode.DAY
-    private var lensFacing = CameraSelector.LENS_FACING_BACK
+    @Volatile private var activeMode = ReferenceRenderer.Mode.DAY
+    @Volatile private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var isBusy = false
     private var cameraModeNote = ""
@@ -87,6 +98,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
+        analysisExecutor = Executors.newSingleThreadExecutor()
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -105,7 +117,13 @@ class MainActivity : ComponentActivity() {
             visibility = View.GONE
             contentDescription = "Selected photo preview"
         }
+        processedPreviewView = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+            contentDescription = "Live viewfinder with selected photo processing"
+        }
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
+        root.addView(processedPreviewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(imageView, FrameLayout.LayoutParams(-1, -1))
 
         val overlay = LinearLayout(this).apply {
@@ -263,6 +281,16 @@ class MainActivity : ComponentActivity() {
             }
             true
         }
+        processedPreviewView.setOnTouchListener { _, event ->
+            detector.onTouchEvent(event)
+            if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
+                try {
+                    val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
+                    boundCamera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
+                } catch (_: Exception) { }
+            }
+            true
+        }
     }
 
     private fun startCamera() {
@@ -301,44 +329,65 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (_: Exception) { }
         }
-        cameraModeNote = when (activeMode) {
-            ReferenceRenderer.Mode.DAY -> "Day"
-            ReferenceRenderer.Mode.NIGHT -> if (usingExtension) "Night capture enhancement" else "Night · single-frame processing"
-            ReferenceRenderer.Mode.PORTRAIT -> if (usingExtension) "Portrait · camera bokeh plus subject blur" else "Portrait · AI background blur"
-        }
         try {
             val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
             val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(flashMode).build()
+            val analysis = ImageAnalysis.Builder()
+                .setTargetResolution(Size(640, 480))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .build()
+            analysis.setAnalyzer(analysisExecutor) { processPreviewFrame(it) }
             provider.unbindAll()
+            var live = false
+            var camera: Camera? = null
+            var extensionBound = usingExtension
+            try {
+                camera = provider.bindToLifecycle(this, selector, preview, capture, analysis)
+                live = true
+            } catch (_: Exception) {
+                analysis.clearAnalyzer()
+                provider.unbindAll()
+                if (usingExtension) {
+                    try {
+                        analysis.setAnalyzer(analysisExecutor) { processPreviewFrame(it) }
+                        camera = provider.bindToLifecycle(this, baseSelector, preview, capture, analysis)
+                        extensionBound = false
+                        live = true
+                    } catch (_: Exception) {
+                        analysis.clearAnalyzer()
+                        provider.unbindAll()
+                        camera = provider.bindToLifecycle(this, baseSelector, preview, capture)
+                        extensionBound = false
+                    }
+                } else {
+                    camera = provider.bindToLifecycle(this, baseSelector, preview, capture)
+                }
+            }
             imageCapture = capture
-            boundCamera = provider.bindToLifecycle(this, selector, preview, capture)
+            imageAnalysis = if (live) analysis else null
+            boundCamera = camera
+            livePreviewAvailable = live
+            cameraModeNote = when (activeMode) {
+                ReferenceRenderer.Mode.DAY -> "Day"
+                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night capture enhancement" else "Night · single-frame processing"
+                ReferenceRenderer.Mode.PORTRAIT -> if (extensionBound) "Portrait · camera bokeh plus subject blur" else "Portrait · AI background blur"
+            }
+            if (live) cameraModeNote += " · live look"
+            if (!live) cameraModeNote += " · live effect unavailable"
             flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
             previewView.visibility = View.VISIBLE
+            processedPreviewView.visibility = View.GONE
             imageView.visibility = View.GONE
             zoomRow.visibility = View.VISIBLE
             captureControls.visibility = View.VISIBLE
             editControls.visibility = View.GONE
+            processedPreviewBitmap?.recycle()
+            processedPreviewBitmap = null
             observeZoom()
             updateStatus()
         } catch (e: Exception) {
-            if (usingExtension) {
-                try {
-                    val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-                    val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                        .setFlashMode(flashMode).build()
-                    provider.unbindAll()
-                    imageCapture = capture
-                    boundCamera = provider.bindToLifecycle(this, baseSelector, preview, capture)
-                    flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
-                    cameraModeNote = when (activeMode) {
-                        ReferenceRenderer.Mode.PORTRAIT -> "Portrait · AI background blur"
-                        ReferenceRenderer.Mode.NIGHT -> "Night · single-frame processing"
-                        else -> "Day"
-                    }
-                    observeZoom(); updateStatus(); return
-                } catch (_: Exception) { }
-            }
             message("Could not configure camera: ${e.localizedMessage ?: "unsupported configuration"}")
         }
     }
@@ -356,6 +405,79 @@ class MainActivity : ComponentActivity() {
         }
         zoomObserver = observer
         camera.cameraInfo.zoomState.observe(this, observer)
+    }
+
+    private fun processPreviewFrame(proxy: ImageProxy) {
+        val mode = activeMode
+        val now = System.nanoTime()
+        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 450_000_000L else 120_000_000L
+        if (now - lastPreviewFrameNanos < minimumInterval) {
+            proxy.close()
+            return
+        }
+        lastPreviewFrameNanos = now
+        var styled: Bitmap? = null
+        try {
+            val plane = proxy.planes.firstOrNull() ?: return
+            val buffer: ByteBuffer = plane.buffer.duplicate()
+            val width = proxy.width
+            val height = proxy.height
+            val pixels = IntArray(width * height)
+            val pixelStride = plane.pixelStride
+            val rowStride = plane.rowStride
+            for (y in 0 until height) {
+                val rowOffset = y * rowStride
+                for (x in 0 until width) {
+                    val offset = rowOffset + x * pixelStride
+                    val r = buffer.get(offset).toInt() and 0xff
+                    val g = buffer.get(offset + 1).toInt() and 0xff
+                    val b = buffer.get(offset + 2).toInt() and 0xff
+                    val a = buffer.get(offset + 3).toInt() and 0xff
+                    pixels[y * width + x] = Color.argb(a, r, g, b)
+                }
+            }
+            val raw = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+            val rotation = proxy.imageInfo.rotationDegrees
+            val oriented = if (rotation != 0 || lensFacing == CameraSelector.LENS_FACING_FRONT) {
+                val transform = Matrix().apply {
+                    postRotate(rotation.toFloat())
+                    if (lensFacing == CameraSelector.LENS_FACING_FRONT) postScale(-1f, 1f)
+                }
+                Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
+            } else raw
+            val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio)
+            styled = colorized
+            oriented.recycle()
+            var output: Bitmap = colorized
+            if (mode == ReferenceRenderer.Mode.PORTRAIT) {
+                val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor().also { livePortraitProcessor = it }
+                val portrait = segmenter.apply(colorized)
+                output = portrait.bitmap
+                if (output !== colorized) colorized.recycle()
+            } else {
+                livePortraitProcessor?.close()
+                livePortraitProcessor = null
+            }
+            if (mode != activeMode) {
+                output.recycle()
+                return
+            }
+            val display = output
+            runOnUiThread {
+                if (previewView.visibility == View.VISIBLE) {
+                    val old = processedPreviewBitmap
+                    processedPreviewBitmap = display
+                    processedPreviewView.setImageBitmap(display)
+                    processedPreviewView.visibility = View.VISIBLE
+                    old?.takeIf { it !== display && !it.isRecycled }?.recycle()
+                } else if (!display.isRecycled) display.recycle()
+            }
+            if (output === colorized) styled = null
+        } catch (_: Exception) {
+            styled?.takeIf { !it.isRecycled }?.recycle()
+        } finally {
+            proxy.close()
+        }
     }
 
     private fun selectZoom(requested: Float) {
@@ -527,6 +649,7 @@ class MainActivity : ComponentActivity() {
         renderedBitmap?.recycle(); renderedBitmap = null
         imageView.setImageDrawable(null)
         imageView.visibility = View.GONE
+        processedPreviewView.visibility = View.GONE
         previewView.visibility = View.VISIBLE
         zoomRow.visibility = View.VISIBLE
         captureControls.visibility = View.VISIBLE
@@ -590,7 +713,10 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         cameraExecutor.shutdown()
+        analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
+        analysisExecutor.shutdown()
         sourceBitmap?.recycle()
         renderedBitmap?.recycle()
+        processedPreviewBitmap?.recycle()
     }
 }

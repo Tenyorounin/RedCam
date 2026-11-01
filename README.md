@@ -5,9 +5,9 @@ An Android camera and photo-rendering prototype built around the visual target i
 ## What it does
 
 - Uses a camera-first interface inspired by the iOS Camera app: live viewfinder, flash control, front/back camera switch, focus tap, pinch zoom, lens zoom stops, mode selection, gallery shortcut, and a large shutter button.
-- The shutter captures, applies the selected colour profile, and saves the finished photo directly to `Pictures/UltraTone`.
+- The live viewfinder renders a throttled, lower-resolution preview of the selected colour profile. The shutter captures, applies the profile at the photo's processing resolution, and saves the finished photo directly to `Pictures/UltraTone`.
 - Offers Day, Night, and Portrait modes. Night enhancement uses a CameraX extension where the phone provides one; otherwise it applies the available single-frame profile.
-- Portrait mode uses the phone's CameraX bokeh extension where available and an on-device ML Kit person mask to blur the background. The bundled model works offline and adds about 4.5 MB to the app. The software mask targets people, so it may not isolate pets or objects reliably.
+- Portrait mode previews a person-aware software background blur and uses the phone's CameraX bokeh extension where available. The final photo runs an on-device ML Kit person mask and background blur. The bundled model works offline and adds about 4.5 MB to the app. The software mask targets people, so it may not isolate pets or objects reliably.
 - Zoom stops are shown only when supported by the active lens. Pinch zoom is also available; optical lens changes and maximum zoom depend on the phone.
 - The gallery thumbnail opens the image picker so an existing photo can be processed with the same modes.
 - Applies an adjustable rendering profile calibrated against seven uploaded Pixel/Xiaomi side-by-side comparison panels and six matched Pixel/X17 Ultra photo pairs. It uses scene-dependent exposure, independent RGB white-balance and tint gains, saturation, midtone contrast, highlight rolloff, and restrained local detail.
@@ -20,7 +20,7 @@ The renderer was calibrated against seven labeled Pixel/Xiaomi composite panels 
 
 The article does not provide the original full-resolution camera files, camera settings, or complete processing parameters. The profile is an original image adjustment and does not copy Xiaomi or Leica software. Results will vary with the input photo, camera sensor, lens, exposure, and phone-specific image processing.
 
-It cannot recreate the Xiaomi's sensor, lens, optical zoom, autofocus, exposure decisions, or proprietary multi-frame capture. The comparison is an offline simulation and has not been verified on-device against fresh captures. Portrait blur is software segmentation and will have edge errors in difficult light, with hair, or when the person blends into the background. Imported images are downsampled only when needed to keep decoded images near or below 16 megapixels, which limits memory use on older devices.
+It cannot recreate the Xiaomi's sensor, lens, optical zoom, autofocus, exposure decisions, or proprietary multi-frame capture. The comparison is an offline simulation and has not been verified on-device against fresh captures. The live processed view is throttled and lower resolution to keep preview responsive; it is a guide to the saved rendering, not a pixel-exact match. Portrait blur is software segmentation and will have edge errors in difficult light, with hair, or when the person blends into the background. Imported images are downsampled only when needed to keep decoded images near or below 16 megapixels, which limits memory use on older devices.
 
 Night mode falls back to a tonal adjustment when the phone lacks a Night extension; that fallback cannot recover detail that the original capture did not record or combine multiple exposures.
 
