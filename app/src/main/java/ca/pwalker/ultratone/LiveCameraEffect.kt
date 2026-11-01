@@ -2,6 +2,7 @@ package ca.pwalker.ultratone
 
 import android.graphics.Bitmap
 import android.graphics.BitmapShader
+import android.graphics.Color
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
@@ -15,12 +16,13 @@ import androidx.camera.view.PreviewView
 internal class LiveCameraEffect private constructor(private val view: PreviewView) {
     private val shader = RuntimeShader(SOURCE)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var depthBitmap: Bitmap? = null
+    private var depthBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
     private var mode = ReferenceRenderer.Mode.DAY
     private var focusX = 0.5f
     private var focusY = 0.5f
 
     init {
+        shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setFloatUniform("strength", 0.78f)
         shader.setFloatUniform("zoomRatio", 1f)
         shader.setIntUniform("mode", 0)
@@ -129,8 +131,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform float2 focusPoint;
 
             float lumaOf(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
-            float smoothCurve(float x) { return x * x * (3.0 - 2.0 * x); }
-
             float3 grade(float3 rgb) {
                 float amount = clamp(strength, 0.0, 1.0);
                 float luma = lumaOf(rgb);
@@ -167,8 +167,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             }
 
             float4 main(float2 p) {
-                float4 sample = cameraImage.eval(p);
-                float3 rgb = sample.rgb;
+                float4 base = cameraImage.eval(p);
+                float3 rgb = base.rgb;
                 if (depthEnabled == 1) {
                     float2 dp = p * depthScale + depthOffset;
                     float2 fp = focusPoint * depthScale + depthOffset;
@@ -191,7 +191,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     ) * 0.125;
                     rgb = mix(rgb, softened, blur);
                 }
-                return float4(grade(rgb), sample.a);
+                return float4(grade(rgb), base.a);
             }
         """.trimIndent()
     }
