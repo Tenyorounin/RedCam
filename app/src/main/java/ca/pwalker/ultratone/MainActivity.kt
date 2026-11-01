@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
@@ -33,6 +35,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.AspectRatio
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.FocusMeteringAction
@@ -43,6 +46,10 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.MeteringPointFactory
 import androidx.camera.core.Preview
 import androidx.camera.core.ZoomState
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -73,6 +80,9 @@ class MainActivity : ComponentActivity() {
     private var exposureRange = 0..0
     @Volatile private var multiFrameDetailEnabled = false
     @Volatile private var nightEnhancementEnabled = false
+    @Volatile private var infinityFocusEnabled = false
+    private var infinityFocusSupported = false
+    private var manualLensFocusSupported = false
     private var moreMenuExpanded = false
     private val focusIndicatorHandler = Handler(Looper.getMainLooper())
     private val hideFocusIndicator = Runnable {
@@ -116,6 +126,7 @@ class MainActivity : ComponentActivity() {
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
     private lateinit var flashButton: TextView
+    private lateinit var infinityFocusButton: TextView
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
     private lateinit var zoomRow: LensZoomControl
@@ -141,6 +152,7 @@ class MainActivity : ComponentActivity() {
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
+        infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -204,6 +216,12 @@ class MainActivity : ComponentActivity() {
         }
         flashButton = pill("⚡ Off") { cycleFlash() }
         top.addView(flashButton, LinearLayout.LayoutParams(dp(76), dp(36)))
+        infinityFocusButton = pill("AF") { toggleInfinityFocus() }.apply {
+            contentDescription = "Switch to infinity focus with blur disabled"
+            isEnabled = false
+            alpha = 0.5f
+        }
+        top.addView(infinityFocusButton, LinearLayout.LayoutParams(dp(44), dp(36)).apply { marginStart = dp(6) })
         status = TextView(this).apply {
             textSize = 14f
             gravity = Gravity.CENTER
@@ -495,6 +513,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun focusOnPreview(source: View, x: Float, y: Float) {
+        if (infinityFocusEnabled) return
         val sourceLocation = IntArray(2)
         val previewLocation = IntArray(2)
         source.getLocationOnScreen(sourceLocation)
@@ -516,6 +535,88 @@ class MainActivity : ComponentActivity() {
             boundCamera?.cameraControl?.startFocusAndMetering(action)
         } catch (_: Exception) { }
         source.performClick()
+    }
+
+    private fun toggleInfinityFocus() {
+        if (!infinityFocusSupported) {
+            message("Infinity focus is not supported by this camera.")
+            return
+        }
+        if (isBusy) return
+        infinityFocusEnabled = !infinityFocusEnabled
+        getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", infinityFocusEnabled).apply()
+        focusIndicator.visibility = View.GONE
+        updateInfinityFocusButton()
+        updateLiveLook()
+        if (activeMode == ReferenceRenderer.Mode.CLOSE_UP) bindCamera()
+        else applyInfinityFocus(infinityFocusEnabled)
+    }
+
+    private fun updateInfinityFocusSupport(cameraInfo: CameraInfo?) {
+        infinityFocusSupported = false
+        manualLensFocusSupported = false
+        try {
+            val info = cameraInfo ?: throw IllegalStateException("No active camera")
+            val camera2 = Camera2CameraInfo.from(info)
+            val minimumDistance = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+            val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            manualLensFocusSupported = minimumDistance != null && minimumDistance > 0f &&
+                capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+            // A fixed-focus lens is already at its fixed focal plane and has no AF to override.
+            infinityFocusSupported = minimumDistance == 0f || manualLensFocusSupported
+        } catch (_: Exception) { }
+        if (!infinityFocusSupported && infinityFocusEnabled) {
+            infinityFocusEnabled = false
+            getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", false).apply()
+        }
+        updateInfinityFocusButton()
+    }
+
+    private fun updateInfinityFocusButton() {
+        if (!::infinityFocusButton.isInitialized) return
+        infinityFocusButton.text = if (infinityFocusEnabled) "∞" else "AF"
+        infinityFocusButton.isEnabled = infinityFocusSupported
+        infinityFocusButton.alpha = if (infinityFocusSupported) 1f else 0.45f
+        infinityFocusButton.setTextColor(if (infinityFocusEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+        infinityFocusButton.contentDescription = if (infinityFocusEnabled)
+            "Infinity focus enabled; tap to restore autofocus. Close-up blur is disabled."
+        else "Autofocus enabled; tap to lock focus at infinity and disable blur."
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applyInfinityFocus(enabled: Boolean) {
+        val camera = boundCamera ?: return
+        if (!manualLensFocusSupported) return
+        try {
+            val control = Camera2CameraControl.from(camera.cameraControl)
+            val future = if (enabled) {
+                val options = CaptureRequestOptions.Builder()
+                    .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                    .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, 0f)
+                    .build()
+                control.setCaptureRequestOptions(options)
+            } else control.clearCaptureRequestOptions()
+            future.addListener({
+                try { future.get() } catch (_: Exception) {
+                    if (enabled && infinityFocusEnabled) runOnUiThread {
+                        infinityFocusEnabled = false
+                        getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", false).apply()
+                        updateInfinityFocusButton()
+                        updateLiveLook()
+                        if (activeMode == ReferenceRenderer.Mode.CLOSE_UP) bindCamera()
+                        message("Infinity focus could not be applied by this camera.")
+                    }
+                }
+            }, ContextCompat.getMainExecutor(this))
+        } catch (_: Exception) {
+            if (enabled) {
+                infinityFocusEnabled = false
+                getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", false).apply()
+                updateInfinityFocusButton()
+                updateLiveLook()
+                message("Infinity focus could not be applied by this camera.")
+            }
+        }
     }
 
     private fun showFocusIndicator(x: Float, y: Float) {
@@ -622,7 +723,7 @@ class MainActivity : ComponentActivity() {
                 val baseCapture = newCapture(baseCaptureMode)
                 // The GPU shader already grades the live preview on Android 13+.
                 // Keep analysis only where it supplies the fallback look or depth map.
-                val needsAnalysis = liveCameraEffect == null || activeMode == ReferenceRenderer.Mode.CLOSE_UP
+                val needsAnalysis = liveCameraEffect == null || (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled)
                 val baseAnalysis = if (needsAnalysis) newAnalysis().also {
                     it.setAnalyzer(analysisExecutor) { proxy -> processPreviewFrame(proxy) }
                 } else null
@@ -646,6 +747,8 @@ class MainActivity : ComponentActivity() {
             imageCapture = capture ?: error("Camera did not provide image capture")
             imageAnalysis = analysis
             boundCamera = camera
+            updateInfinityFocusSupport(camera?.cameraInfo)
+            if (infinityFocusEnabled) applyInfinityFocus(true)
             configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
@@ -760,12 +863,13 @@ class MainActivity : ComponentActivity() {
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
             if (effect != null) {
+                if (infinityFocusEnabled) return
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
                 val guide = processor.createDepthGuide(oriented)
                 oriented.recycle()
                 if (guide != null) {
                     runOnUiThread {
-                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP) {
+                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
                             effect.updateDepthGuide(guide)
                         } else if (!guide.isRecycled) guide.recycle()
                     }
@@ -776,7 +880,7 @@ class MainActivity : ComponentActivity() {
             styled = colorized
             oriented.recycle()
             var output: Bitmap = colorized
-            if (mode == ReferenceRenderer.Mode.CLOSE_UP) {
+            if (mode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
                 val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
                 val focus = mapFocusToFrame(
                     focusX, focusY, previewView.width, previewView.height, colorized.width, colorized.height,
@@ -869,7 +973,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled)
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled)
     }
 
     private fun updateFinishButtons() {
@@ -1005,6 +1109,7 @@ class MainActivity : ComponentActivity() {
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
         val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
+        val infinityFocusAtCapture = infinityFocusEnabled
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
@@ -1026,7 +1131,7 @@ class MainActivity : ComponentActivity() {
                     photoProcessingExecutor.execute {
                         try {
                             val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
-                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture)
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1128,7 +1233,7 @@ class MainActivity : ComponentActivity() {
                         val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
                             decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image")
                         processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
-                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture)
                     } catch (e: Exception) {
                         runOnUiThread {
                             pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1198,7 +1303,8 @@ class MainActivity : ComponentActivity() {
         modeAtCapture: ReferenceRenderer.Mode,
         strengthAtCapture: Float,
         finishAtCapture: ReferenceRenderer.Finish,
-        nightEnhanceAtCapture: Boolean = false
+        nightEnhanceAtCapture: Boolean = false,
+        infinityFocusAtCapture: Boolean = false
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -1213,7 +1319,7 @@ class MainActivity : ComponentActivity() {
                 focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
-            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP) (try {
+            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
                 PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
@@ -1290,6 +1396,7 @@ class MainActivity : ComponentActivity() {
                     exposureRow.visibility = View.GONE
                     detailMergeButton.visibility = View.GONE
                     nightEnhancementButton.visibility = View.GONE
+                    infinityFocusButton.visibility = View.GONE
                     renderImported(upright)
                 }
             } catch (e: Exception) { runOnUiThread { message("Could not open photo: ${e.localizedMessage ?: "unsupported file"}") } }
@@ -1342,6 +1449,8 @@ class MainActivity : ComponentActivity() {
         retirePreviewBitmap(processedPreviewBitmap)
         processedPreviewBitmap = null
         previewView.visibility = View.VISIBLE
+        infinityFocusButton.visibility = View.VISIBLE
+        updateInfinityFocusButton()
         zoomRow.visibility = View.VISIBLE
         captureControls.visibility = View.VISIBLE
         editControls.visibility = View.GONE
