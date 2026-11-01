@@ -154,8 +154,8 @@ object ReferenceRenderer {
                     // Avoid accentuating high-ISO grain when no multi-frame night
                     // extension is available on the device.
                     Mode.NIGHT -> if (abs(localDetail) < 0.035f) 0.25f else 0.55f
-                    // A restrained portrait rendering profile; no fake blur or
-                    // subject cut-out is applied to avoid edge artifacts.
+                    // Keep portrait texture restrained; a separate ML mask handles
+                    // background blur after this colour rendering pass.
                     Mode.PORTRAIT -> if (abs(localDetail) < 0.035f) 0.35f else 0.8f
                 }
 
