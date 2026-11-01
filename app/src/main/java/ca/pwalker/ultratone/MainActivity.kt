@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var activeFinish = ReferenceRenderer.Finish.COLOUR
     @Volatile private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var flashMode = ImageCapture.FLASH_MODE_OFF
+    private var nightExtensionActive = false
     private var isBusy = false
     private var cameraModeNote = ""
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
@@ -432,10 +433,11 @@ class MainActivity : ComponentActivity() {
             imageCapture = capture
             imageAnalysis = if (live) analysis else null
             boundCamera = camera
+            nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
             cameraModeNote = when (activeMode) {
                 ReferenceRenderer.Mode.DAY -> "Day"
-                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night capture enhancement" else "Night · single-frame processing"
+                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night · camera multi-frame" else "Night · two-frame merge"
                 ReferenceRenderer.Mode.PORTRAIT -> "Portrait · relative-depth blur"
             }
             if (live) cameraModeNote += " · live look"
@@ -632,7 +634,6 @@ class MainActivity : ComponentActivity() {
         isBusy = true
         shutterButton.isEnabled = false
         status.text = "Taking photo…"
-        val file = File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
         val focusYAtCapture = focusY
@@ -640,6 +641,28 @@ class MainActivity : ComponentActivity() {
         val modeAtCapture = activeMode
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
+        if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive) {
+            status.text = "Taking night frames…"
+            val files = listOf(
+                File(cacheDir, "night-a-${System.currentTimeMillis()}.jpg"),
+                File(cacheDir, "night-b-${System.currentTimeMillis()}.jpg")
+            )
+            captureNightFrames(capture, files, 0) { merged ->
+                try {
+                    if (merged == null) {
+                        isBusy = false
+                        shutterButton.isEnabled = true
+                        message("Night capture failed; try again with the phone steadier.")
+                        updateStatus()
+                    } else {
+                        processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                    }
+                } finally { files.forEach { it.delete() } }
+            }
+            return
+        }
+
+        val file = File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
@@ -648,29 +671,7 @@ class MainActivity : ComponentActivity() {
                         BitmapFactory.decodeFile(file.absolutePath, bounds)
                         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions(bounds.outWidth, bounds.outHeight))
                             ?: error("Could not decode captured image")
-                        val upright = orient(bitmap, file)
-                        val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
-                        val focus = mapFocusToFrame(
-                            focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
-                            upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
-                        )
-                        val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try {
-                            PortraitBlur.apply(this@MainActivity, style, focus.first, focus.second)
-                        } catch (_: Exception) { null }) else null
-                        val final = portrait?.bitmap ?: style
-                        upright.recycle()
-                        if (final !== style) style.recycle()
-                        val uri = saveBitmap(final)
-                        runOnUiThread {
-                            isBusy = false
-                            shutterButton.isEnabled = true
-                            status.text = if (portrait?.usedDepth == true) "Saved · depth-aware portrait blur" else "Saved to Pictures/UltraTone"
-                            updateThumbnail(final)
-                            message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && portrait?.usedDepth != true && portrait?.subjectDetected != true)
-                                "Saved; portrait blur could not detect usable depth or a person" else "Photo processed and saved")
-                            final.recycle()
-                        }
-                        lastPhotoUri = uri
+                        processCapturedBitmap(orient(bitmap, file), zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
                     } catch (e: Exception) {
                         runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
                     } finally { file.delete() }
@@ -680,6 +681,69 @@ class MainActivity : ComponentActivity() {
                     file.delete()
                 }
             })
+    }
+
+    private fun captureNightFrames(capture: ImageCapture, files: List<File>, index: Int, onComplete: (Bitmap?) -> Unit) {
+        if (index >= files.size) {
+            try { onComplete(NightBurstMerger.merge(files)) } catch (_: Exception) { onComplete(null) }
+            return
+        }
+        capture.takePicture(ImageCapture.OutputFileOptions.Builder(files[index]).build(), cameraExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                    if (index + 1 < files.size) {
+                        runOnUiThread { status.text = "Taking night frames (${index + 2}/${files.size})…" }
+                    }
+                    captureNightFrames(capture, files, index + 1, onComplete)
+                }
+                override fun onError(error: ImageCaptureException) { onComplete(null) }
+            })
+    }
+
+    private fun processCapturedBitmap(
+        upright: Bitmap,
+        zoom: Float,
+        focusXAtCapture: Float,
+        focusYAtCapture: Float,
+        facingAtCapture: Int,
+        modeAtCapture: ReferenceRenderer.Mode,
+        strengthAtCapture: Float,
+        finishAtCapture: ReferenceRenderer.Finish
+    ) {
+        var style: Bitmap? = null
+        var final: Bitmap? = null
+        try {
+            val styled = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
+            style = styled
+            val focus = mapFocusToFrame(
+                focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
+                upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
+            )
+            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try {
+                PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
+            } catch (_: Exception) { null }) else null
+            val rendered = portrait?.bitmap ?: styled
+            final = rendered
+            val uri = saveBitmap(rendered)
+            lastPhotoUri = uri
+            val savedPortrait = portrait
+            if (rendered !== styled) styled.recycle()
+            runOnUiThread {
+                isBusy = false
+                shutterButton.isEnabled = true
+                status.text = if (savedPortrait?.usedDepth == true) "Saved · depth-aware portrait blur" else "Saved to Pictures/UltraTone"
+                updateThumbnail(rendered)
+                message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
+                    "Saved; portrait blur could not detect usable depth or a person" else "Photo processed and saved")
+                rendered.recycle()
+            }
+        } catch (e: Exception) {
+            style?.takeIf { it !== final }?.recycle()
+            final?.takeIf { it !== style }?.recycle()
+            runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
+        } finally {
+            upright.recycle()
+        }
     }
 
     private fun saveBitmap(bitmap: Bitmap): Uri {
