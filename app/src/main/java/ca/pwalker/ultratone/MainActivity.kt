@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
     private var processedPreviewBitmap: Bitmap? = null
     private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
     private var lastPreviewFrameNanos = 0L
+    private var previewCooldownUntilNanos = 0L
     private var livePreviewAvailable = false
     @Volatile private var focusX = 0.5f
     @Volatile private var focusY = 0.5f
@@ -402,7 +403,9 @@ class MainActivity : ComponentActivity() {
             val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(flashMode).build()
             val analysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(480, 360))
+                // The processed feed is only a live view; full-resolution stills
+                // use ImageCapture and keep their original detail.
+                .setTargetResolution(Size(320, 240))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
@@ -499,7 +502,7 @@ class MainActivity : ComponentActivity() {
         val mode = activeMode
         val now = System.nanoTime()
         val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 900_000_000L else 150_000_000L
-        if (now - lastPreviewFrameNanos < minimumInterval) {
+        if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
         }
@@ -569,6 +572,14 @@ class MainActivity : ComponentActivity() {
             styled?.takeIf { !it.isRecycled }?.recycle()
         } finally {
             proxy.close()
+            val processingNanos = System.nanoTime() - now
+            // If CPU rendering is already missing its target interval, give the
+            // camera and UI threads time between frames instead of running the
+            // analysis executor continuously at full load.
+            if (processingNanos > minimumInterval * 3 / 5) {
+                val restNanos = (processingNanos / 2).coerceIn(100_000_000L, 450_000_000L)
+                previewCooldownUntilNanos = System.nanoTime() + restNanos
+            }
         }
     }
 
