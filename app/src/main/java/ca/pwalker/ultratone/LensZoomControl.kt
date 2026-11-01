@@ -23,7 +23,7 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
     private val tickOverlay: View
     private var minRatio = 1f
     private var maxRatio = 1f
-    private var lensSwitchRatios = emptyList<Float>()
+    private var majorZoomStops = emptyList<Float>()
     private var updatingFromCamera = false
     var onZoomChanged: ((Float) -> Unit)? = null
 
@@ -58,7 +58,19 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                     if (fromUser && !updatingFromCamera) onZoomChanged?.invoke(ratio)
                 }
                 override fun onStartTrackingTouch(bar: SeekBar?) = Unit
-                override fun onStopTrackingTouch(bar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    val current = bar?.progress ?: return
+                    val nearest = majorZoomStops.minByOrNull { kotlin.math.abs(progressAt(it) - current) } ?: return
+                    val stopProgress = progressAt(nearest)
+                    val snapDistance = (dp(20).toFloat() / bar.width.coerceAtLeast(1) * bar.max).toInt().coerceAtLeast(1)
+                    if (kotlin.math.abs(stopProgress - current) <= snapDistance) {
+                        updatingFromCamera = true
+                        bar.progress = stopProgress
+                        updateLabel(nearest)
+                        updatingFromCamera = false
+                        onZoomChanged?.invoke(nearest)
+                    }
+                }
             })
         }
         track.addView(slider, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -86,13 +98,9 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                     val x = left + width * progress / slider.max
                     canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
                 }
-                // 1× is always a reference point; additional major marks follow
-                // the physical-camera switch ratios reported by this device.
-                val majorRatios = (lensSwitchRatios + 1f)
-                    .filter { it.isFinite() && it >= minRatio && it <= maxRatio }
-                    .distinctBy { (it * 100).toInt() }
-                majorRatios.forEach { ratio ->
-                    if (ratio < minRatio || ratio > maxRatio) return@forEach
+                // Mark the 1× reference, supported range limits, useful fallback
+                // steps, and all physical-lens ratios reported by this device.
+                majorZoomStops.forEach { ratio ->
                     val x = left + width * progressAt(ratio) / slider.max
                     canvas.drawLine(x, centerY - dp(10), x, centerY + dp(10), majorTickPaint)
                 }
@@ -108,8 +116,10 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
     fun setZoomRange(min: Float, max: Float, lensRatios: List<Float>) {
         minRatio = min.takeIf { it.isFinite() && it > 0f } ?: 1f
         maxRatio = max.takeIf { it.isFinite() && it >= minRatio } ?: minRatio
-        lensSwitchRatios = lensRatios.filter { it.isFinite() && it >= minRatio && it <= maxRatio }
+        majorZoomStops = (lensRatios + listOf(minRatio, 1f, 2f, 5f, maxRatio))
+            .filter { it.isFinite() && it >= minRatio && it <= maxRatio }
             .distinctBy { (it * 100).toInt() }
+            .sorted()
         tickOverlay.invalidate()
         setZoomRatio(slider.progress.let(::ratioAt))
     }
