@@ -13,7 +13,8 @@ import kotlin.math.max
  */
 object NightBurstMerger {
     private const val MAX_DECODE_PIXELS = 16_000_000L
-    private const val ALIGNMENT_SCALE = 8
+    private const val ALIGNMENT_SCALE = 16
+    private const val DETAIL_ALIGNMENT_SCALE = 8
     private const val MAX_LUMA_DELTA = 24
     private const val MAX_RGB_DELTA = 72
 
@@ -29,11 +30,13 @@ object NightBurstMerger {
         val firstScore = sharpnessScore(frames[0])
         val secondScore = sharpnessScore(frames[1])
         val referenceFirst = secondScore <= firstScore * 1.02
-        return merge(if (referenceFirst) frames else frames.reversed())
+        return mergeInternal(if (referenceFirst) frames else frames.reversed(), detailAlignment = true)
     }
 
-    fun merge(frames: List<Frame>): Bitmap {
-        require(frames.size == 2) { "Night fallback expects two captures" }
+    fun merge(frames: List<Frame>): Bitmap = mergeInternal(frames, detailAlignment = false)
+
+    private fun mergeInternal(frames: List<Frame>, detailAlignment: Boolean): Bitmap {
+        require(frames.size == 2) { "Burst merge expects two captures" }
         // Decode the reference mutable so we can reuse it directly. This avoids
         // a full-resolution bitmap copy on the capture-processing path.
         val base = decodeUpright(frames[0], mutable = true)
@@ -52,7 +55,8 @@ object NightBurstMerger {
             } else second
             aligned = alignedFrame
 
-            val (dx, dy) = estimateShift(reference, alignedFrame, width, height)
+            val (dx, dy) = estimateShift(reference, alignedFrame, width, height,
+                if (detailAlignment) DETAIL_ALIGNMENT_SCALE else ALIGNMENT_SCALE)
             val secondRow = IntArray(width)
             for (y in 0 until height) {
                 val sourceY = y + dy
@@ -142,8 +146,7 @@ object NightBurstMerger {
         ).also { if (it !== decoded) decoded.recycle() }
     }
 
-    private fun estimateShift(reference: IntArray, frame: Bitmap, width: Int, height: Int): Pair<Int, Int> {
-        val scale = ALIGNMENT_SCALE
+    private fun estimateShift(reference: IntArray, frame: Bitmap, width: Int, height: Int, scale: Int): Pair<Int, Int> {
         val smallWidth = max(1, width / scale)
         val smallHeight = max(1, height / scale)
         val small = Bitmap.createScaledBitmap(frame, smallWidth, smallHeight, true)
@@ -159,7 +162,8 @@ object NightBurstMerger {
         val top = smallHeight / 8
         val bottom = smallHeight * 7 / 8
         val stride = 4
-        for (dy in -4..4) for (dx in -4..4) {
+        val searchRadius = if (scale == DETAIL_ALIGNMENT_SCALE) 4 else 3
+        for (dy in -searchRadius..searchRadius) for (dx in -searchRadius..searchRadius) {
             var cost = 0.0
             var count = 0
             var y = top
