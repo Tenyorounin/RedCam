@@ -5,7 +5,7 @@ An Android camera app with an adaptive colour profile and selectable black-and-w
 ## Features
 
 - Camera controls for flash, front and back cameras, tap to focus, pinch to zoom, and Day, Night, and Close-up modes.
-- A real-time GPU viewfinder effect. Captured photos retain full camera resolution and are saved to `Pictures/UltraTone`.
+- A real-time GPU viewfinder effect. Captured photos are processed at up to 16 megapixels and saved to `Pictures/UltraTone`.
 - Adaptive tone and colour processing that adjusts contrast, highlight rolloff, shadows, saturation, and selective hues to the scene.
 - A black-and-white finish with its own channel mix and tonal curve.
 - Close-up mode uses on-device relative depth and the tapped focus point to control background blur. A person mask helps preserve subject edges; depth estimation also supports non-person subjects.
@@ -16,7 +16,7 @@ An Android camera app with an adaptive colour profile and selectable black-and-w
 
 The colour profile applies a scene-aware tone curve, highlight rolloff, shadow shaping, saturation separation, and selective colour changes. It works on the phone's processed camera image; it does not recreate another camera's sensor, lens, or image pipeline. The live viewfinder and saved-photo renderer use matching tone and colour equations so the selected look carries through to the capture.
 
-Close-up blur estimates relative depth rather than measured distance. Hair, thin objects, reflections, and occlusion boundaries can produce depth errors. Phone movement is not required. Imported images above 16 megapixels are downsampled for memory safety.
+Close-up blur estimates relative depth rather than measured distance. Hair, thin objects, reflections, and occlusion boundaries can produce depth errors. Phone movement is not required. Images above 16 megapixels are downsampled for memory safety.
 
 ## Build and install
 
