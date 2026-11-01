@@ -41,12 +41,12 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("mode", when (mode) {
             ReferenceRenderer.Mode.DAY -> 0
             ReferenceRenderer.Mode.NIGHT -> 1
-            ReferenceRenderer.Mode.PORTRAIT -> 2
+            ReferenceRenderer.Mode.CLOSE_UP -> 2
         })
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))
         shader.setFloatUniform("zoomRatio", zoom.coerceAtLeast(1f))
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.PORTRAIT && depthBitmap != null) 1 else 0)
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && depthBitmap != null) 1 else 0)
         updateSize()
     }
 
@@ -66,7 +66,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         depthBitmap = bitmap
         val input = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         shader.setInputShader("depthGuide", input)
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.PORTRAIT) 1 else 0)
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP) 1 else 0)
         updateSize()
         if (old != null && old !== bitmap) {
             mainHandler.postDelayed({ if (old !== depthBitmap && !old.isRecycled) old.recycle() }, 2_000L)
