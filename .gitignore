@@ -1,0 +1,4 @@
+.gradle/
+**/build/
+app/src/main/assets/fused_model_uint8_256.onnx
+app/src/main/assets/fused_model_uint8_256.onnx.download

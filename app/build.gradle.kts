@@ -3,6 +3,30 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val portraitDepthModel = layout.projectDirectory.file("src/main/assets/fused_model_uint8_256.onnx")
+val downloadPortraitDepthModel by tasks.registering {
+    outputs.file(portraitDepthModel)
+    doLast {
+        val modelFile = portraitDepthModel.asFile
+        if (!modelFile.exists() || modelFile.length() != 27_342_208L) {
+            modelFile.parentFile.mkdirs()
+            val temporary = modelFile.resolveSibling("${modelFile.name}.download")
+            val url = java.net.URL(
+                "https://github.com/shubham0204/Depth-Anything-Android/releases/download/model-v2/fused_model_uint8_256.onnx"
+            )
+            url.openConnection().apply {
+                connectTimeout = 20_000
+                readTimeout = 120_000
+            }.getInputStream().use { input -> temporary.outputStream().use { input.copyTo(it) } }
+            check(temporary.length() == 27_342_208L) { "Portrait depth model download was incomplete" }
+            check(modelFile.delete() || !modelFile.exists()) { "Could not replace the portrait depth model" }
+            check(temporary.renameTo(modelFile)) { "Could not install the portrait depth model" }
+        }
+    }
+}
+
+tasks.named("preBuild").configure { dependsOn(downloadPortraitDepthModel) }
+
 android {
     namespace = "ca.pwalker.ultratone"
     compileSdk = 35
@@ -33,4 +57,5 @@ dependencies {
     implementation("androidx.camera:camera-extensions:1.4.1")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }

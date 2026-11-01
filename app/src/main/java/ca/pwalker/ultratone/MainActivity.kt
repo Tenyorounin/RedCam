@@ -71,6 +71,8 @@ class MainActivity : ComponentActivity() {
     private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
     private var lastPreviewFrameNanos = 0L
     private var livePreviewAvailable = false
+    @Volatile private var focusX = 0.5f
+    @Volatile private var focusY = 0.5f
     @Volatile private var styleStrength = 0.75f
     private var currentZoomRatio = 1f
     @Volatile private var activeMode = ReferenceRenderer.Mode.DAY
@@ -273,6 +275,8 @@ class MainActivity : ComponentActivity() {
         previewView.setOnTouchListener { view, event ->
             detector.onTouchEvent(event)
             if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
+                focusX = (event.x / view.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                focusY = (event.y / view.height.coerceAtLeast(1)).coerceIn(0f, 1f)
                 try {
                     val factory: MeteringPointFactory = previewView.meteringPointFactory
                     val point = factory.createPoint(event.x, event.y)
@@ -284,6 +288,8 @@ class MainActivity : ComponentActivity() {
         processedPreviewView.setOnTouchListener { _, event ->
             detector.onTouchEvent(event)
             if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
+                focusX = (event.x / processedPreviewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
+                focusY = (event.y / processedPreviewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
                 try {
                     val point = previewView.meteringPointFactory.createPoint(event.x, event.y)
                     boundCamera?.cameraControl?.startFocusAndMetering(FocusMeteringAction.Builder(point).build())
@@ -316,7 +322,9 @@ class MainActivity : ComponentActivity() {
         val extension = when (activeMode) {
             ReferenceRenderer.Mode.DAY -> null
             ReferenceRenderer.Mode.NIGHT -> ExtensionMode.NIGHT
-            ReferenceRenderer.Mode.PORTRAIT -> ExtensionMode.BOKEH
+            // Applying OEM bokeh before software depth estimation can erase depth cues
+            // and leave a second blurred edge around the selected subject.
+            ReferenceRenderer.Mode.PORTRAIT -> null
         }
         var selector = baseSelector
         var usingExtension = false
@@ -372,7 +380,7 @@ class MainActivity : ComponentActivity() {
             cameraModeNote = when (activeMode) {
                 ReferenceRenderer.Mode.DAY -> "Day"
                 ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night capture enhancement" else "Night · single-frame processing"
-                ReferenceRenderer.Mode.PORTRAIT -> if (extensionBound) "Portrait · camera bokeh plus subject blur" else "Portrait · AI background blur"
+                ReferenceRenderer.Mode.PORTRAIT -> "Portrait · relative-depth blur"
             }
             if (live) cameraModeNote += " · live look"
             if (!live) cameraModeNote += " · live effect unavailable"
@@ -410,7 +418,7 @@ class MainActivity : ComponentActivity() {
     private fun processPreviewFrame(proxy: ImageProxy) {
         val mode = activeMode
         val now = System.nanoTime()
-        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 450_000_000L else 120_000_000L
+        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 1_000_000_000L else 120_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval) {
             proxy.close()
             return
@@ -450,8 +458,8 @@ class MainActivity : ComponentActivity() {
             oriented.recycle()
             var output: Bitmap = colorized
             if (mode == ReferenceRenderer.Mode.PORTRAIT) {
-                val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor().also { livePortraitProcessor = it }
-                val portrait = segmenter.apply(colorized)
+                val segmenter = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
+                val portrait = segmenter.apply(colorized, focusX, focusY)
                 output = portrait.bitmap
                 if (output !== colorized) colorized.recycle()
             } else {
@@ -532,6 +540,8 @@ class MainActivity : ComponentActivity() {
         status.text = "Taking photo…"
         val file = File(cacheDir, "capture-${System.currentTimeMillis()}.jpg")
         val zoom = currentZoomRatio
+        val focusXAtCapture = focusX
+        val focusYAtCapture = focusY
         val modeAtCapture = activeMode
         val strengthAtCapture = styleStrength
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
@@ -544,7 +554,9 @@ class MainActivity : ComponentActivity() {
                             ?: error("Could not decode captured image")
                         val upright = orient(bitmap, file)
                         val style = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom)
-                        val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try { PortraitBlur.apply(style) } catch (_: Exception) { null }) else null
+                        val portrait = if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT) (try {
+                            PortraitBlur.apply(this@MainActivity, style, focusXAtCapture, focusYAtCapture)
+                        } catch (_: Exception) { null }) else null
                         val final = portrait?.bitmap ?: style
                         upright.recycle()
                         if (final !== style) style.recycle()
@@ -552,10 +564,10 @@ class MainActivity : ComponentActivity() {
                         runOnUiThread {
                             isBusy = false
                             shutterButton.isEnabled = true
-                            status.text = if (portrait?.subjectDetected == true) "Saved · portrait blur applied" else "Saved to Pictures/UltraTone"
+                            status.text = if (portrait?.usedDepth == true) "Saved · depth-aware portrait blur" else "Saved to Pictures/UltraTone"
                             updateThumbnail(final)
-                            message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && portrait?.subjectDetected != true)
-                                "Saved; portrait blur was skipped because no person was isolated" else "Photo processed and saved")
+                            message(if (modeAtCapture == ReferenceRenderer.Mode.PORTRAIT && portrait?.usedDepth != true && portrait?.subjectDetected != true)
+                                "Saved; portrait blur could not detect usable depth or a person" else "Photo processed and saved")
                             final.recycle()
                         }
                         lastPhotoUri = uri
@@ -619,14 +631,16 @@ class MainActivity : ComponentActivity() {
         cameraExecutor.execute {
             try {
                 val styled = ReferenceRenderer.render(source, styleStrength, mode)
-                val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) (try { PortraitBlur.apply(styled) } catch (_: Exception) { null }) else null
+                val portrait = if (mode == ReferenceRenderer.Mode.PORTRAIT) (try {
+                    PortraitBlur.apply(this@MainActivity, styled, focusX, focusY)
+                } catch (_: Exception) { null }) else null
                 val output = portrait?.bitmap ?: styled
                 if (output !== styled) styled.recycle()
                 runOnUiThread {
                     renderedBitmap?.recycle()
                     renderedBitmap = output
                     imageView.setImageBitmap(output)
-                    status.text = if (portrait?.subjectDetected == true) "Portrait · person detected, background blurred" else "${modeName(mode)} look preview"
+                    status.text = if (portrait?.usedDepth == true) "Portrait · relative-depth preview" else "${modeName(mode)} look preview"
                 }
             } catch (e: Exception) { runOnUiThread { message("Processing failed: ${e.localizedMessage ?: "not enough memory"}") } }
         }
