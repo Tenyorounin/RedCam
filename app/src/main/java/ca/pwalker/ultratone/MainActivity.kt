@@ -68,9 +68,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var exposure: SeekBar
     private lateinit var exposureLabel: TextView
     private lateinit var detailMergeButton: TextView
+    private lateinit var nightEnhancementButton: TextView
     private lateinit var focusIndicator: View
     private var exposureRange = 0..0
     @Volatile private var multiFrameDetailEnabled = false
+    @Volatile private var nightEnhancementEnabled = false
+    private var moreMenuExpanded = false
     private val focusIndicatorHandler = Handler(Looper.getMainLooper())
     private val hideFocusIndicator = Runnable {
         if (::focusIndicator.isInitialized) {
@@ -137,6 +140,7 @@ class MainActivity : ComponentActivity() {
         analysisExecutor = Executors.newSingleThreadExecutor()
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
+        nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
@@ -328,6 +332,17 @@ class MainActivity : ComponentActivity() {
         })
         updateDetailMergeButton()
 
+        nightEnhancementButton = pill("") { toggleNightEnhancement() }.apply {
+            visibility = View.GONE
+            textSize = 12f
+            maxLines = 1
+            contentDescription = "Night-only low-light enhancement. Off"
+        }
+        bottom.addView(nightEnhancementButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        updateNightEnhancementButton()
+
         captureControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -371,10 +386,8 @@ class MainActivity : ComponentActivity() {
         captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(64), dp(64)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         captureControls.addView(pill("More") {
-            val show = detailMergeButton.visibility != View.VISIBLE
-            strengthRow.visibility = if (show) View.VISIBLE else View.GONE
-            detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
-            if (previewView.visibility == View.VISIBLE) updateExposureControl(show)
+            moreMenuExpanded = !moreMenuExpanded
+            updateMoreMenu()
         },
             LinearLayout.LayoutParams(dp(54), dp(36)))
         bottom.addView(captureControls)
@@ -816,6 +829,7 @@ class MainActivity : ComponentActivity() {
         if (lensFacing == CameraSelector.LENS_FACING_FRONT && activeMode == ReferenceRenderer.Mode.NIGHT) {
             activeMode = ReferenceRenderer.Mode.DAY
             updateModeButtons()
+            updateMoreMenu()
         }
         bindCamera()
     }
@@ -841,6 +855,7 @@ class MainActivity : ComponentActivity() {
             analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         }
         updateModeButtons()
+        updateMoreMenu()
         sourceBitmap?.let { renderImported(it) }
         if (previewView.visibility == View.VISIBLE && cameraProvider != null) bindCamera()
     }
@@ -854,7 +869,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio)
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled)
     }
 
     private fun updateFinishButtons() {
@@ -932,6 +947,31 @@ class MainActivity : ComponentActivity() {
         detailMergeButton.contentDescription = "Two-frame deblur and detail merge, $state"
     }
 
+    private fun toggleNightEnhancement() {
+        nightEnhancementEnabled = !nightEnhancementEnabled
+        getPreferences(MODE_PRIVATE).edit().putBoolean("night_enhancement_enabled", nightEnhancementEnabled).apply()
+        updateNightEnhancementButton()
+        updateLiveLook()
+    }
+
+    private fun updateNightEnhancementButton() {
+        if (!::nightEnhancementButton.isInitialized) return
+        val state = if (nightEnhancementEnabled) "On" else "Off"
+        nightEnhancementButton.text = "Night enhance: $state"
+        nightEnhancementButton.setTextColor(if (nightEnhancementEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+        nightEnhancementButton.setTypeface(null, if (nightEnhancementEnabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+        nightEnhancementButton.contentDescription = "Night-only low-light enhancement, $state"
+    }
+
+    private fun updateMoreMenu() {
+        if (!::detailMergeButton.isInitialized || !::nightEnhancementButton.isInitialized) return
+        val show = moreMenuExpanded && previewView.visibility == View.VISIBLE
+        strengthRow.visibility = if (show) View.VISIBLE else View.GONE
+        detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
+        nightEnhancementButton.visibility = if (show && activeMode == ReferenceRenderer.Mode.NIGHT) View.VISIBLE else View.GONE
+        if (::exposureRow.isInitialized && previewView.visibility == View.VISIBLE) updateExposureControl(show)
+    }
+
     private fun updateModeButtons() {
         applyControlSizing()
         modeButtons.forEach { (mode, button) ->
@@ -964,6 +1004,7 @@ class MainActivity : ComponentActivity() {
         val detailMergeAtCapture = multiFrameDetailEnabled
         val strengthAtCapture = styleStrength
         val finishAtCapture = activeFinish
+        val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
@@ -985,7 +1026,7 @@ class MainActivity : ComponentActivity() {
                     photoProcessingExecutor.execute {
                         try {
                             val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
-                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1024,7 +1065,7 @@ class MainActivity : ComponentActivity() {
                         try {
                             val merged = NightBurstMerger.mergeDetail(frames)
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
-                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1156,12 +1197,17 @@ class MainActivity : ComponentActivity() {
         facingAtCapture: Int,
         modeAtCapture: ReferenceRenderer.Mode,
         strengthAtCapture: Float,
-        finishAtCapture: ReferenceRenderer.Finish
+        finishAtCapture: ReferenceRenderer.Finish,
+        nightEnhanceAtCapture: Boolean = false
     ) {
         var style: Bitmap? = null
+        var enhanced: Bitmap? = null
         var final: Bitmap? = null
         try {
-            val styled = ReferenceRenderer.render(upright, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
+            val imageForStyle = if (nightEnhanceAtCapture && modeAtCapture == ReferenceRenderer.Mode.NIGHT) {
+                NightEnhancement.apply(upright).also { enhanced = it }
+            } else upright
+            val styled = ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture)
             style = styled
             val focus = mapFocusToFrame(
                 focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
@@ -1197,6 +1243,7 @@ class MainActivity : ComponentActivity() {
                 updateStatus()
             }
         } finally {
+            enhanced?.takeIf { !it.isRecycled }?.recycle()
             upright.recycle()
         }
     }
@@ -1242,6 +1289,7 @@ class MainActivity : ComponentActivity() {
                     strengthRow.visibility = View.VISIBLE
                     exposureRow.visibility = View.GONE
                     detailMergeButton.visibility = View.GONE
+                    nightEnhancementButton.visibility = View.GONE
                     renderImported(upright)
                 }
             } catch (e: Exception) { runOnUiThread { message("Could not open photo: ${e.localizedMessage ?: "unsupported file"}") } }
