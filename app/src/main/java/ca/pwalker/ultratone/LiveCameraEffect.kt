@@ -37,7 +37,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
 
-    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float) {
+    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false) {
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
@@ -49,6 +49,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             ReferenceRenderer.Mode.CLOSE_UP -> 2
         })
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
+        shader.setIntUniform("nightEnhancement", if (nightEnhancement && mode == ReferenceRenderer.Mode.NIGHT) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))
         shader.setFloatUniform("zoomRatio", zoom.coerceAtLeast(1f))
         shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide) 1 else 0)
@@ -130,6 +131,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform float zoomRatio;
             uniform int mode;
             uniform int monochrome;
+            uniform int nightEnhancement;
             uniform int depthEnabled;
             uniform float2 viewSize;
             uniform float2 depthScale;
@@ -137,6 +139,24 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform float2 focusPoint;
 
             float lumaOf(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+            float3 enhanceNight(float2 p, float3 rgb) {
+                float2 offset = 3.0 / max(viewSize, float2(1.0));
+                float localLight = (
+                    lumaOf(cameraImage.eval(p + float2(offset.x, 0.0)).rgb) +
+                    lumaOf(cameraImage.eval(p - float2(offset.x, 0.0)).rgb) +
+                    lumaOf(cameraImage.eval(p + float2(0.0, offset.y)).rgb) +
+                    lumaOf(cameraImage.eval(p - float2(0.0, offset.y)).rgb) +
+                    lumaOf(rgb) * 2.0
+                ) / 6.0;
+                float current = lumaOf(rgb);
+                float mappedLight = 0.93 * pow(max(localLight, 0.0), 0.78) + 0.018;
+                float reflectance = clamp(current / (localLight + 0.045), 0.0, 2.6);
+                float restored = clamp(mappedLight * pow(reflectance, 0.90), 0.0, 1.0);
+                float target = mix(current, restored, 0.72);
+                float saturation = mix(0.70, 1.0, smoothstep(0.06, 0.34, current));
+                return clamp(float3(target) + (rgb - float3(current)) * saturation, 0.0, 1.0);
+            }
+
             float3 grade(float3 rgb) {
                 float amount = clamp(strength, 0.0, 1.0);
                 float luma = lumaOf(rgb);
@@ -175,6 +195,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             float4 main(float2 p) {
                 float4 base = cameraImage.eval(p);
                 float3 rgb = base.rgb;
+                if (nightEnhancement == 1 && mode == 1) rgb = enhanceNight(p, rgb);
                 if (depthEnabled == 1) {
                     float2 dp = p * depthScale + depthOffset;
                     float2 fp = focusPoint * depthScale + depthOffset;
