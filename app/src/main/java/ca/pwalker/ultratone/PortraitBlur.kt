@@ -35,6 +35,9 @@ object PortraitBlur {
         fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f): Result =
             PortraitBlur.apply(appContext, source, segmenter, focusX, focusY)
 
+        /** Builds a compact depth/person guide for the GPU live-preview blur. */
+        fun createDepthGuide(source: Bitmap): Bitmap? = PortraitBlur.createDepthGuide(appContext, source, segmenter)
+
         override fun close() = segmenter.close()
     }
 
@@ -52,6 +55,51 @@ object PortraitBlur {
         return if (depth != null) applyDepth(source, mask, depth, focusX, focusY)
         else if (mask != null) applyMaskFallback(source, mask)
         else Result(source, false, false)
+    }
+
+    private fun createDepthGuide(
+        context: Context,
+        source: Bitmap,
+        segmenter: Segmenter
+    ): Bitmap? {
+        val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { return null }
+        val mask = try {
+            Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 10, TimeUnit.SECONDS)
+        } catch (_: Exception) { null }
+        val ordered = depth.values.sortedArray()
+        if (ordered.isEmpty()) return null
+        val low = ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)]
+        val high = ordered[(ordered.size * 0.94f).toInt().coerceIn(0, ordered.lastIndex)]
+        val span = (high - low).coerceAtLeast(0.035f)
+        val maskWidth = mask?.width ?: 0
+        val maskHeight = mask?.height ?: 0
+        val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }
+        val confidenceRow = FloatArray(maskWidth)
+        val guideScale = 256f / max(source.width, source.height)
+        val guideWidth = max(1, (source.width * guideScale).toInt())
+        val guideHeight = max(1, (source.height * guideScale).toInt())
+        val guide = IntArray(guideWidth * guideHeight)
+        for (y in 0 until guideHeight) {
+            val depthY = min(depth.height - 1, y * depth.height / guideHeight)
+            val maskY = if (mask != null) min(maskHeight - 1, y * maskHeight / guideHeight) else 0
+            if (confidence != null) {
+                confidence.position(maskY * maskWidth)
+                confidence.get(confidenceRow, 0, maskWidth)
+            }
+            for (x in 0 until guideWidth) {
+                val depthX = min(depth.width - 1, x * depth.width / guideWidth)
+                val index = depthY * depth.width + depthX
+                val relative = ((depth.values[index] - low) / span).coerceIn(0f, 1f)
+                val person = if (confidence != null && mask != null) {
+                    val maskX = min(maskWidth - 1, x * maskWidth / guideWidth)
+                    confidenceRow[maskX].coerceIn(0f, 1f)
+                } else 0f
+                val depthByte = (relative * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val personByte = (person * 255f + 0.5f).toInt().coerceIn(0, 255)
+                guide[y * guideWidth + x] = Color.rgb(depthByte, personByte, 0)
+            }
+        }
+        return Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
     }
 
     private fun applyDepth(

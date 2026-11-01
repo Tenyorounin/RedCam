@@ -75,6 +75,7 @@ class MainActivity : ComponentActivity() {
     private var renderedBitmap: Bitmap? = null
     private var lastPhotoUri: Uri? = null
     private var processedPreviewBitmap: Bitmap? = null
+    private var liveCameraEffect: LiveCameraEffect? = null
     private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
     private var lastPreviewFrameNanos = 0L
     private var previewCooldownUntilNanos = 0L
@@ -126,6 +127,7 @@ class MainActivity : ComponentActivity() {
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             contentDescription = "Live camera viewfinder. Tap to focus; pinch to zoom."
         }
+        liveCameraEffect = LiveCameraEffect.attach(previewView)
         imageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
@@ -139,6 +141,8 @@ class MainActivity : ComponentActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(processedPreviewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(imageView, FrameLayout.LayoutParams(-1, -1))
+        previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
+        updateLiveLook()
 
         val overlay = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -338,6 +342,7 @@ class MainActivity : ComponentActivity() {
             if (event.action == MotionEvent.ACTION_UP && !detector.isInProgress) {
                 focusX = (event.x / view.width.coerceAtLeast(1)).coerceIn(0f, 1f)
                 focusY = (event.y / view.height.coerceAtLeast(1)).coerceIn(0f, 1f)
+                liveCameraEffect?.setFocus(focusX, focusY)
                 try {
                     val factory: MeteringPointFactory = previewView.meteringPointFactory
                     val point = factory.createPoint(event.x, event.y)
@@ -471,6 +476,7 @@ class MainActivity : ComponentActivity() {
         val observer = Observer<ZoomState> { state ->
             if (state == null) return@Observer
             currentZoomRatio = state.zoomRatio
+            updateLiveLook()
             zoomButtons.forEach { (ratio, view) ->
                 val available = ratio >= state.minZoomRatio - 0.03f && ratio <= state.maxZoomRatio + 0.03f
                 view.visibility = if (available) View.VISIBLE else View.GONE
@@ -501,7 +507,12 @@ class MainActivity : ComponentActivity() {
     private fun processPreviewFrame(proxy: ImageProxy) {
         val mode = activeMode
         val now = System.nanoTime()
-        val minimumInterval = if (mode == ReferenceRenderer.Mode.PORTRAIT) 900_000_000L else 150_000_000L
+        val effect = liveCameraEffect
+        if (effect != null && mode != ReferenceRenderer.Mode.PORTRAIT) {
+            proxy.close()
+            return
+        }
+        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.PORTRAIT) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -536,6 +547,19 @@ class MainActivity : ComponentActivity() {
                 }
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
+            if (effect != null) {
+                val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
+                val guide = processor.createDepthGuide(oriented)
+                oriented.recycle()
+                if (guide != null) {
+                    runOnUiThread {
+                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.PORTRAIT) {
+                            effect.updateDepthGuide(guide)
+                        } else if (!guide.isRecycled) guide.recycle()
+                    }
+                }
+                return
+            }
             val colorized = ReferenceRenderer.render(oriented, styleStrength, mode, currentZoomRatio, activeFinish)
             styled = colorized
             oriented.recycle()
@@ -613,6 +637,10 @@ class MainActivity : ComponentActivity() {
 
     private fun selectMode(mode: ReferenceRenderer.Mode) {
         activeMode = mode
+        updateLiveLook()
+        if (mode != ReferenceRenderer.Mode.PORTRAIT) {
+            analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
+        }
         updateModeButtons()
         sourceBitmap?.let { renderImported(it) }
         if (previewView.visibility == View.VISIBLE && cameraProvider != null) bindCamera()
@@ -620,9 +648,14 @@ class MainActivity : ComponentActivity() {
 
     private fun selectFinish(finish: ReferenceRenderer.Finish) {
         activeFinish = finish
+        updateLiveLook()
         updateFinishButtons()
         sourceBitmap?.let { renderImported(it) }
         updateStatus()
+    }
+
+    private fun updateLiveLook() {
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio)
     }
 
     private fun updateFinishButtons() {
@@ -942,6 +975,8 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
+        liveCameraEffect?.close()
+        liveCameraEffect = null
         cameraExecutor.shutdown()
         analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         analysisExecutor.shutdown()
