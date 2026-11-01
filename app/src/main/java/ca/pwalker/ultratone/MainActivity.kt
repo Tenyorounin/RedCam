@@ -91,6 +91,10 @@ class MainActivity : ComponentActivity() {
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var nightExtensionActive = false
     private var isBusy = false
+    // Keep at most three disk-backed captures outstanding (one processing and
+    // up to two waiting). Full-resolution bitmaps stay on the single worker.
+    private var pendingPhotoCount = 0
+    private val maxPendingPhotos = 3
     private var cameraModeNote = ""
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
@@ -680,8 +684,13 @@ class MainActivity : ComponentActivity() {
 
     private fun capture() {
         if (isBusy) return
+        if (pendingPhotoCount >= maxPendingPhotos) {
+            message("Photo queue is full; wait for a save to finish.")
+            return
+        }
         val capture = imageCapture ?: run { message("Camera is starting. Try again in a moment."); return }
         isBusy = true
+        pendingPhotoCount++
         shutterButton.isEnabled = false
         status.text = "Taking photo…"
         val zoom = currentZoomRatio
@@ -700,11 +709,19 @@ class MainActivity : ComponentActivity() {
             captureNightFrames(capture, files, 0) { merged ->
                 try {
                     if (merged == null) {
-                        isBusy = false
-                        shutterButton.isEnabled = true
-                        message("Night capture failed; try again with the phone steadier.")
-                        updateStatus()
+                        runOnUiThread {
+                            isBusy = false
+                            pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                            refreshShutterAvailability()
+                            message("Night capture failed; try again with the phone steadier.")
+                            updateStatus()
+                        }
                     } else {
+                        runOnUiThread {
+                            isBusy = false
+                            refreshShutterAvailability()
+                            showQueueStatus()
+                        }
                         photoProcessingExecutor.execute {
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
                         }
@@ -718,6 +735,11 @@ class MainActivity : ComponentActivity() {
         capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), cameraExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                    runOnUiThread {
+                        isBusy = false
+                        refreshShutterAvailability()
+                        showQueueStatus()
+                    }
                     photoProcessingExecutor.execute {
                         try {
                             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -726,12 +748,23 @@ class MainActivity : ComponentActivity() {
                                 ?: error("Could not decode captured image")
                             processCapturedBitmap(orient(bitmap, file), zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
                         } catch (e: Exception) {
-                            runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
+                            runOnUiThread {
+                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                                refreshShutterAvailability()
+                                message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                                updateStatus()
+                            }
                         } finally { file.delete() }
                     }
                 }
                 override fun onError(error: ImageCaptureException) {
-                    runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Capture failed: ${error.message ?: "camera error"}"); updateStatus() }
+                    runOnUiThread {
+                        isBusy = false
+                        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                        refreshShutterAvailability()
+                        message("Capture failed: ${error.message ?: "camera error"}")
+                        updateStatus()
+                    }
                     file.delete()
                 }
             })
@@ -785,19 +818,24 @@ class MainActivity : ComponentActivity() {
             val savedPortrait = portrait
             if (rendered !== styled) styled.recycle()
             runOnUiThread {
-                isBusy = false
-                shutterButton.isEnabled = true
-                status.text = if (savedPortrait?.usedDepth == true) "Saved · close-up depth blur" else "Saved to Pictures/UltraTone"
+                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                refreshShutterAvailability()
+                status.text = if (pendingPhotoCount > 0) "Saved · ${pendingPhotoCount} photo(s) still processing" else if (savedPortrait?.usedDepth == true) "Saved · close-up depth blur" else "Saved to Pictures/UltraTone"
                 updateThumbnail(rendered)
                 message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
                     "Saved; close-up blur could not detect usable depth or a person" else "Photo processed and saved")
                 rendered.recycle()
-                status.postDelayed({ if (!isBusy && previewView.visibility == View.VISIBLE) updateStatus() }, 2500L)
+                status.postDelayed({ if (!isBusy && pendingPhotoCount == 0 && previewView.visibility == View.VISIBLE) updateStatus() }, 2500L)
             }
         } catch (e: Exception) {
             final?.takeIf { it !== style }?.recycle()
             style?.recycle()
-            runOnUiThread { isBusy = false; shutterButton.isEnabled = true; message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}"); updateStatus() }
+            runOnUiThread {
+                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                refreshShutterAvailability()
+                message("Photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                updateStatus()
+            }
         } finally {
             upright.recycle()
         }
@@ -951,7 +989,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateStatus() {
-        if (!isBusy) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"} · ${strength.progress}%"
+        if (!isBusy && pendingPhotoCount == 0) status.text = "$cameraModeNote · ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "Colour" else "B&W"} · ${strength.progress}%"
+    }
+
+    private fun showQueueStatus() {
+        if (pendingPhotoCount > 0) status.text = "Processing photos · $pendingPhotoCount queued"
+    }
+
+    private fun refreshShutterAvailability() {
+        if (!::shutterButton.isInitialized) return
+        shutterButton.isEnabled = imageCapture != null && !isBusy && pendingPhotoCount < maxPendingPhotos
     }
 
     private fun pill(label: String, action: () -> Unit): TextView = TextView(this).apply {
