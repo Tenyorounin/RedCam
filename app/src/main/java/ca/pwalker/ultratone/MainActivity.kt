@@ -377,7 +377,7 @@ class MainActivity : ComponentActivity() {
             FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP).apply { topMargin = dp(52) }
         }
         bottomPanel.layoutParams = if (landscape) {
-            FrameLayout.LayoutParams(dp(292), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+            FrameLayout.LayoutParams(dp(148), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
                 marginEnd = dp(12)
             }
         } else {
@@ -385,6 +385,7 @@ class MainActivity : ComponentActivity() {
                 bottomMargin = dp(12)
             }
         }
+        applyControlSizing(landscape)
     }
 
     private fun buildNightCaptureIndicator(root: FrameLayout) {
@@ -796,23 +797,46 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun applyControlSizing() {
+    private fun applyControlSizing(landscape: Boolean =
+        resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
         if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
         bottomPanel.setPadding(dp(8), dp(7), dp(8), dp(6))
+
+        // In landscape, stack each control group inside the right-side camera panel.
+        modeRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         modeRow.setPadding(0, dp(2), 0, dp(2))
-        modeButtons.values.forEach { it.setPadding(dp(10), dp(4), dp(10), dp(4)) }
+        modeButtons.values.forEach { button ->
+            button.setPadding(dp(10), dp(4), dp(10), dp(4))
+            button.layoutParams = LinearLayout.LayoutParams(
+                if (landscape) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
+                if (landscape) dp(28) else ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        finishRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         finishRow.setPadding(0, 0, 0, dp(2))
         finishButtons.values.forEach { button ->
             val lp = button.layoutParams as? LinearLayout.LayoutParams ?: return@forEach
-            lp.width = dp(88)
-            lp.height = dp(30)
+            lp.width = if (landscape) ViewGroup.LayoutParams.MATCH_PARENT else dp(88)
+            lp.height = if (landscape) dp(28) else dp(30)
+            lp.marginStart = if (landscape) 0 else dp(4)
+            lp.marginEnd = if (landscape) 0 else dp(4)
+            lp.topMargin = if (landscape) dp(2) else 0
+            lp.bottomMargin = if (landscape) dp(2) else 0
             button.layoutParams = lp
         }
+
+        captureControls.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        captureControls.gravity = if (landscape) Gravity.CENTER else Gravity.CENTER_VERTICAL
         captureControls.setPadding(0, dp(2), 0, 0)
-        resizeControl(thumbnailButton, 42, 42)
-        resizeControl(shutterButton, 64, 64)
+        listOf(captureControls.getChildAt(1), captureControls.getChildAt(3)).forEach { spacer ->
+            spacer.visibility = if (landscape) View.GONE else View.VISIBLE
+            spacer.layoutParams = if (landscape) LinearLayout.LayoutParams(0, 0) else LinearLayout.LayoutParams(0, 1, 1f)
+        }
+        resizeControl(thumbnailButton, if (landscape) 38 else 42, if (landscape) 38 else 42)
+        resizeControl(shutterButton, if (landscape) 58 else 64, if (landscape) 58 else 64)
         val more = captureControls.getChildAt(captureControls.childCount - 1)
-        resizeControl(more, 54, 36)
+        resizeControl(more, if (landscape) 72 else 54, if (landscape) 32 else 36)
     }
 
     private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {
