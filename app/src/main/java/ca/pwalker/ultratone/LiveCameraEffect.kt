@@ -81,7 +81,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         val input = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
         shader.setInputShader("depthGuide", input)
         hasFreshDepthGuide = true
-        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide) 1 else 0)
+        shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide && !infinityFocus) 1 else 0)
         updateSize()
         if (old != null && old !== bitmap) {
             mainHandler.postDelayed({ if (old !== depthBitmap && !old.isRecycled) old.recycle() }, 2_000L)
