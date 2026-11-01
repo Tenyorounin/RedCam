@@ -32,8 +32,8 @@ The included workflow builds a debug APK in GitHub's hosted runner and saves it 
 
 1. Create a GitHub repository and upload the contents of this project folder to its root. Keep `.github/workflows/build-apk.yml` in place.
 2. Push the files to the repository's `main` branch. The workflow will start automatically. You can also start it from the repository's **Actions** tab with **Run workflow**.
-3. Open the completed **Build debug APK** run and download the `ultratone-debug-apk` artifact. Extract it to get `app-debug.apk`.
-4. Transfer the APK to the Android phone and install it. Android may ask you to allow installation from the app used to open the APK.
+3. Open the completed **Build debug APK** run and download the `ultratone-debug-apk` artifact. It contains four APKs split by CPU architecture.
+4. Install the matching APK: `arm64-v8a` for most current phones, `armeabi-v7a` for older 32-bit ARM phones, or `x86` / `x86_64` for Intel devices and emulators. Android may ask you to allow installation from the app used to open the APK.
 
 The APK is debug-signed for personal testing. It is not a Play Store release build. GitHub Actions use is free for public repositories; private repositories use the account's included monthly compute allowance and may incur charges if that allowance is exceeded.
 
