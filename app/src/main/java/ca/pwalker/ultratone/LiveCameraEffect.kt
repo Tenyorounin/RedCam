@@ -79,33 +79,28 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     }
 
     private fun updateSize() {
-        shader.setFloatUniform("viewSize", view.width.coerceAtLeast(1).toFloat(), view.height.coerceAtLeast(1).toFloat())
+        val viewWidth = view.width.coerceAtLeast(1).toFloat()
+        val viewHeight = view.height.coerceAtLeast(1).toFloat()
+        shader.setFloatUniform("viewSize", viewWidth, viewHeight)
         val guide = depthBitmap
+        val guideWidth = guide?.width?.coerceAtLeast(1)?.toFloat() ?: 1f
+        val guideHeight = guide?.height?.coerceAtLeast(1)?.toFloat() ?: 1f
+        val fitScale = minOf(viewWidth / guideWidth, viewHeight / guideHeight)
+        val renderedWidth = guideWidth * fitScale
+        val renderedHeight = guideHeight * fitScale
+        val offsetX = (viewWidth - renderedWidth) / 2f
+        val offsetY = (viewHeight - renderedHeight) / 2f
+        val scaleX = guideWidth / renderedWidth.coerceAtLeast(1f)
+        val scaleY = guideHeight / renderedHeight.coerceAtLeast(1f)
         shader.setFloatUniform(
             "depthScale",
-            guide?.let {
-                val frameAspect = it.width.toFloat() / it.height.coerceAtLeast(1)
-                val viewAspect = view.width.coerceAtLeast(1).toFloat() / view.height.coerceAtLeast(1)
-                it.width * minOf(1f, viewAspect / frameAspect) / view.width.coerceAtLeast(1)
-            } ?: 1f,
-            guide?.let {
-                val frameAspect = it.width.toFloat() / it.height.coerceAtLeast(1)
-                val viewAspect = view.width.coerceAtLeast(1).toFloat() / view.height.coerceAtLeast(1)
-                it.height * minOf(1f, frameAspect / viewAspect) / view.height.coerceAtLeast(1)
-            } ?: 1f
+            scaleX,
+            scaleY
         )
         shader.setFloatUniform(
             "depthOffset",
-            guide?.let {
-                val frameAspect = it.width.toFloat() / it.height.coerceAtLeast(1)
-                val viewAspect = view.width.coerceAtLeast(1).toFloat() / view.height.coerceAtLeast(1)
-                it.width * (1f - minOf(1f, viewAspect / frameAspect)) / 2f
-            } ?: 0f,
-            guide?.let {
-                val frameAspect = it.width.toFloat() / it.height.coerceAtLeast(1)
-                val viewAspect = view.width.coerceAtLeast(1).toFloat() / view.height.coerceAtLeast(1)
-                it.height * (1f - minOf(1f, frameAspect / viewAspect)) / 2f
-            } ?: 0f
+            -offsetX * scaleX,
+            -offsetY * scaleY
         )
         setFocus(focusX, focusY)
     }
