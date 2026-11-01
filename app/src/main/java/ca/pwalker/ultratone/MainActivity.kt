@@ -1006,6 +1006,7 @@ class MainActivity : ComponentActivity() {
                 if (frames == null) {
                     runOnUiThread {
                         isBusy = false
+                        setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
                         message("Detail capture failed; try again with the phone steadier.")
@@ -1014,6 +1015,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     runOnUiThread {
                         isBusy = false
+                        setNightCaptureActive(false)
                         refreshShutterAvailability()
                         setStatusMessage("Merging detail frames…")
                         showQueueStatus()
