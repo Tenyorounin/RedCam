@@ -20,6 +20,6 @@ Close-up blur estimates relative depth rather than measured distance. Hair, thin
 
 ## Build and install
 
-GitHub Actions builds an arm64 debug APK for initial Pixel validation. The APK is debug-signed for sideloading, not a Play Store release. The workflow downloads and bundles the depth model, so close-up blur works offline after installation; the first build needs network access.
+GitHub Actions builds an arm64 debug APK for pushes to `main` and pull requests targeting `main`. The APK is debug-signed for sideloading, not a Play Store release. The workflow downloads and bundles the depth model, so close-up blur works offline after installation; the first build needs network access.
 
 Model attribution is listed in [MODEL_NOTICES.md](MODEL_NOTICES.md).
