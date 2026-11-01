@@ -1,3 +1,5 @@
+import java.net.URL
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,13 +13,15 @@ val downloadPortraitDepthModel by tasks.registering {
         if (!modelFile.exists() || modelFile.length() != 27_342_208L) {
             modelFile.parentFile.mkdirs()
             val temporary = modelFile.resolveSibling("${modelFile.name}.download")
-            val url = java.net.URL(
+            val url = URL(
                 "https://github.com/shubham0204/Depth-Anything-Android/releases/download/model-v2/fused_model_uint8_256.onnx"
             )
-            url.openConnection().apply {
-                connectTimeout = 20_000
-                readTimeout = 120_000
-            }.getInputStream().use { input -> temporary.outputStream().use { input.copyTo(it) } }
+            val connection = url.openConnection()
+            connection.connectTimeout = 20_000
+            connection.readTimeout = 120_000
+            connection.getInputStream().use { input ->
+                temporary.outputStream().use { output -> input.copyTo(output) }
+            }
             check(temporary.length() == 27_342_208L) { "Portrait depth model download was incomplete" }
             check(modelFile.delete() || !modelFile.exists()) { "Could not replace the portrait depth model" }
             check(temporary.renameTo(modelFile)) { "Could not install the portrait depth model" }
