@@ -32,6 +32,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalZeroShutterLag
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
@@ -386,6 +387,7 @@ class MainActivity : ComponentActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+    @OptIn(ExperimentalZeroShutterLag::class)
     private fun bindCamera() {
         val provider = cameraProvider ?: return
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
@@ -410,60 +412,87 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { }
         }
         try {
-            // Request the same sensor aspect ratio for preview, stills and analysis.
-            // FIT_CENTER then shows the complete 4:3 sensor frame on tall screens.
-            val preview = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            // CameraX extensions support Preview and ImageCapture, not ImageAnalysis.
+            // Bind the vendor Night pipeline without analysis so it isn't silently
+            // rejected and replaced by our software fallback.
+            fun newPreview() = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
                 .build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            val capture = ImageCapture.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setFlashMode(flashMode).build()
-            val analysis = ImageAnalysis.Builder()
-                // The processed feed is only a live view; full-resolution stills
-                // use ImageCapture and keep their original detail.
+            fun newCapture(mode: Int) = ImageCapture.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setCaptureMode(mode)
+                .setFlashMode(flashMode)
+                .build()
+            fun newAnalysis() = ImageAnalysis.Builder()
                 .setTargetResolution(Size(320, 240))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
-            analysis.setAnalyzer(analysisExecutor) { processPreviewFrame(it) }
+
             provider.unbindAll()
-            var live = false
             var camera: Camera? = null
-            var extensionBound = usingExtension
-            try {
-                camera = provider.bindToLifecycle(this, selector, preview, capture, analysis)
-                live = true
-            } catch (_: Exception) {
-                analysis.clearAnalyzer()
-                provider.unbindAll()
-                if (usingExtension) {
-                    try {
-                        analysis.setAnalyzer(analysisExecutor) { processPreviewFrame(it) }
-                        camera = provider.bindToLifecycle(this, baseSelector, preview, capture, analysis)
-                        extensionBound = false
-                        live = true
-                    } catch (_: Exception) {
-                        analysis.clearAnalyzer()
-                        provider.unbindAll()
-                        camera = provider.bindToLifecycle(this, baseSelector, preview, capture)
-                        extensionBound = false
-                    }
-                } else {
-                    camera = provider.bindToLifecycle(this, baseSelector, preview, capture)
+            var capture: ImageCapture? = null
+            var analysis: ImageAnalysis? = null
+            var live = false
+            var extensionBound = false
+
+            if (usingExtension) {
+                try {
+                    val extensionPreview = newPreview()
+                    val extensionCapture = newCapture(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    camera = provider.bindToLifecycle(this, selector, extensionPreview, extensionCapture)
+                    capture = extensionCapture
+                    extensionBound = true
+                } catch (_: Exception) {
+                    provider.unbindAll()
                 }
             }
-            imageCapture = capture
-            imageAnalysis = if (live) analysis else null
+
+            if (camera == null) {
+                val basePreview = newPreview()
+                // Keep normal captures at max quality. The software night burst
+                // uses ZSL when flash is off; CameraX falls back if unsupported.
+                val baseCaptureMode = when {
+                    activeMode != ReferenceRenderer.Mode.NIGHT -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+                    flashMode == ImageCapture.FLASH_MODE_OFF -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
+                    else -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                }
+                val baseCapture = newCapture(baseCaptureMode)
+                // The GPU shader already grades the live preview on Android 13+.
+                // Keep analysis only where it supplies the fallback look or depth map.
+                val needsAnalysis = liveCameraEffect == null || activeMode == ReferenceRenderer.Mode.CLOSE_UP
+                val baseAnalysis = if (needsAnalysis) newAnalysis().also {
+                    it.setAnalyzer(analysisExecutor) { proxy -> processPreviewFrame(proxy) }
+                } else null
+                try {
+                    camera = if (baseAnalysis != null) {
+                        provider.bindToLifecycle(this, baseSelector, basePreview, baseCapture, baseAnalysis)
+                    } else {
+                        provider.bindToLifecycle(this, baseSelector, basePreview, baseCapture)
+                    }
+                    capture = baseCapture
+                    analysis = baseAnalysis
+                    live = baseAnalysis != null
+                } catch (_: Exception) {
+                    baseAnalysis?.clearAnalyzer()
+                    provider.unbindAll()
+                    camera = provider.bindToLifecycle(this, baseSelector, basePreview, baseCapture)
+                    capture = baseCapture
+                }
+            }
+
+            imageCapture = capture ?: error("Camera did not provide image capture")
+            imageAnalysis = analysis
             boundCamera = camera
             configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
             cameraModeNote = when (activeMode) {
                 ReferenceRenderer.Mode.DAY -> "Day"
-                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night · camera multi-frame" else "Night · two-frame merge"
+                ReferenceRenderer.Mode.NIGHT -> if (extensionBound) "Night · device camera extension" else "Night · two-frame fallback"
                 ReferenceRenderer.Mode.CLOSE_UP -> "Close-up · relative-depth blur"
             }
-            if (live) cameraModeNote += " · live look"
-            if (!live) cameraModeNote += " · live effect unavailable"
+            if (live || liveCameraEffect != null) cameraModeNote += " · live look"
+            if (!live && liveCameraEffect == null) cameraModeNote += " · live effect unavailable"
             flashButton.visibility = if (boundCamera?.cameraInfo?.hasFlashUnit() == true) View.VISIBLE else View.INVISIBLE
             previewView.visibility = View.VISIBLE
             processedPreviewView.visibility = View.GONE
@@ -764,31 +793,35 @@ class MainActivity : ComponentActivity() {
         val finishAtCapture = activeFinish
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive) {
             status.text = "Taking night frames…"
-            val files = listOf(
-                File(cacheDir, "night-a-${System.currentTimeMillis()}.jpg"),
-                File(cacheDir, "night-b-${System.currentTimeMillis()}.jpg")
-            )
-            captureNightFrames(capture, files, 0) { merged ->
-                try {
-                    if (merged == null) {
-                        runOnUiThread {
-                            isBusy = false
-                            pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
-                            refreshShutterAvailability()
-                            message("Night capture failed; try again with the phone steadier.")
-                            updateStatus()
-                        }
-                    } else {
-                        runOnUiThread {
-                            isBusy = false
-                            refreshShutterAvailability()
-                            showQueueStatus()
-                        }
-                        photoProcessingExecutor.execute {
+            captureNightFrames(capture, mutableListOf(), 0) { frames ->
+                if (frames == null) {
+                    runOnUiThread {
+                        isBusy = false
+                        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                        refreshShutterAvailability()
+                        message("Night capture failed; try again with the phone steadier.")
+                        updateStatus()
+                    }
+                } else {
+                    runOnUiThread {
+                        isBusy = false
+                        refreshShutterAvailability()
+                        showQueueStatus()
+                    }
+                    photoProcessingExecutor.execute {
+                        try {
+                            val merged = NightBurstMerger.merge(frames)
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture)
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                                refreshShutterAvailability()
+                                message("Night photo processing failed: ${e.localizedMessage ?: "unknown error"}")
+                                updateStatus()
+                            }
                         }
                     }
-                } finally { files.forEach { it.delete() } }
+                }
             }
             return
         }
@@ -832,18 +865,37 @@ class MainActivity : ComponentActivity() {
             })
     }
 
-    private fun captureNightFrames(capture: ImageCapture, files: List<File>, index: Int, onComplete: (Bitmap?) -> Unit) {
-        if (index >= files.size) {
-            try { onComplete(NightBurstMerger.merge(files)) } catch (_: Exception) { onComplete(null) }
+    private fun captureNightFrames(
+        capture: ImageCapture,
+        frames: MutableList<NightBurstMerger.Frame>,
+        index: Int,
+        onComplete: (List<NightBurstMerger.Frame>?) -> Unit
+    ) {
+        if (index >= 2) {
+            onComplete(frames.toList())
             return
         }
-        capture.takePicture(ImageCapture.OutputFileOptions.Builder(files[index]).build(), cameraExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    if (index + 1 < files.size) {
-                        runOnUiThread { status.text = "Taking night frames (${index + 2}/${files.size})…" }
+        capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                override fun onCaptureSuccess(image: ImageProxy) {
+                    var nextFrame: NightBurstMerger.Frame? = null
+                    try {
+                        check(image.format == android.graphics.ImageFormat.JPEG) { "Night capture returned an unsupported image format" }
+                        val buffer = image.planes.firstOrNull()?.buffer?.duplicate()
+                            ?: error("Night capture returned no image data")
+                        val jpeg = ByteArray(buffer.remaining())
+                        buffer.get(jpeg)
+                        nextFrame = NightBurstMerger.Frame(jpeg, image.imageInfo.rotationDegrees)
+                    } catch (_: Exception) { }
+                    image.close()
+                    if (nextFrame == null) {
+                        onComplete(null)
+                        return
                     }
-                    captureNightFrames(capture, files, index + 1, onComplete)
+                    frames += nextFrame
+                    if (index + 1 < 2) {
+                        runOnUiThread { status.text = "Taking night frames (${index + 2}/2)…" }
+                    }
+                    captureNightFrames(capture, frames, index + 1, onComplete)
                 }
                 override fun onError(error: ImageCaptureException) { onComplete(null) }
             })
