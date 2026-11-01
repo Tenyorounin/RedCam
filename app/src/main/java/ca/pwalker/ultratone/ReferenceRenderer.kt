@@ -29,6 +29,9 @@ object ReferenceRenderer {
         val row = IntArray(width)
         val histogram = IntArray(256)
         var saturationTotal = 0.0
+        var neutralRedGreen = 0.0
+        var neutralBlueGreen = 0.0
+        var neutralSamples = 0L
         var samples = 0L
         val sampleStep = max(1, max(width, height) / 512)
         val sampleRow = IntArray(width)
@@ -47,7 +50,15 @@ object ReferenceRenderer {
                 histogram[(luma * 255f).toInt().coerceIn(0, 255)]++
                 val maximum = max(r, max(g, b))
                 val minimum = min(r, min(g, b))
-                saturationTotal += if (maximum <= 0.001f) 0.0 else ((maximum - minimum) / maximum).toDouble()
+                val saturation = if (maximum <= 0.001f) 0f else (maximum - minimum) / maximum
+                saturationTotal += saturation.toDouble()
+                // Estimate only a restrained illuminant correction from neutral,
+                // midtone pixels. Avoid letting saturated lamps dictate AWB.
+                if (mode == Mode.NIGHT && saturation < 0.18f && luma in 0.16f..0.78f && g > 0.025f) {
+                    neutralRedGreen += kotlin.math.ln((r / g).coerceIn(0.4f, 2.5f)).toDouble()
+                    neutralBlueGreen += kotlin.math.ln((b / g).coerceIn(0.4f, 2.5f)).toDouble()
+                    neutralSamples++
+                }
                 samples++
             }
         }
@@ -59,6 +70,17 @@ object ReferenceRenderer {
         val keyBias = ((0.46f - median) * 0.08f).coerceIn(-0.025f, 0.025f)
         val meanSaturation = if (samples == 0L) 0f else (saturationTotal / samples).toFloat()
         val sceneSaturation = (1.12f - max(0f, meanSaturation - 0.35f) * 0.30f).coerceIn(1.00f, 1.12f)
+        val nightRedGain: Float
+        val nightBlueGain: Float
+        if (mode == Mode.NIGHT && neutralSamples >= 32) {
+            // Damped and capped: retain warm/cool night ambience instead of
+            // forcing every scene toward neutral white.
+            nightRedGain = kotlin.math.exp((-neutralRedGreen / neutralSamples * 0.30).coerceIn(-0.06, 0.06)).toFloat()
+            nightBlueGain = kotlin.math.exp((-neutralBlueGreen / neutralSamples * 0.30).coerceIn(-0.06, 0.06)).toFloat()
+        } else {
+            nightRedGain = 1f
+            nightBlueGain = 1f
+        }
         val zoomDetail = ((zoomRatio - 1f) / 4f).coerceIn(0f, 1f)
         val detailAmount = when (mode) {
             Mode.DAY -> 0.035f + zoomDetail * 0.035f
@@ -82,9 +104,13 @@ object ReferenceRenderer {
             for (x in 0 until width) {
                 val c = row[x]
                 val alpha = Color.alpha(c)
-                val r = Color.red(c) / 255f
+                var r = Color.red(c) / 255f
                 val g = Color.green(c) / 255f
-                val b = Color.blue(c) / 255f
+                var b = Color.blue(c) / 255f
+                if (mode == Mode.NIGHT) {
+                    r = (r * nightRedGain).coerceIn(0f, 1f)
+                    b = (b * nightBlueGain).coerceIn(0f, 1f)
+                }
                 val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
                 val left = lumaOf(row[max(0, x - 1)])
                 val right = lumaOf(row[min(width - 1, x + 1)])
@@ -116,14 +142,16 @@ object ReferenceRenderer {
                     continue
                 }
 
-                Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv)
+                val adjustedInput = if (mode == Mode.NIGHT) Color.rgb(toByte(r), toByte(g), toByte(b)) else c
+                Color.RGBToHSV(Color.red(adjustedInput), Color.green(adjustedInput), Color.blue(adjustedInput), hsv)
                 val hue = hsv[0]
                 val saturation = hsv[1]
                 val value = hsv[2]
                 val hueShift = m9HueShift(hue)
                 val greenWeight = gaussianHue(hue, 118f, 38f)
                 val saturationBoost = (sceneSaturation - 1f) * smoothstep(((saturation - 0.16f) / 0.62f).coerceIn(0f, 1f))
-                val adjustedSaturation = (saturation + saturationBoost - 0.055f * greenWeight * (1f - smoothstep(((value - 0.25f) / 0.55f).coerceIn(0f, 1f))))
+                val shadowChromaRetention = if (mode == Mode.NIGHT) 0.70f + 0.30f * smoothstep(((luma - 0.035f) / 0.24f).coerceIn(0f, 1f)) else 1f
+                val adjustedSaturation = ((saturation + saturationBoost - 0.055f * greenWeight * (1f - smoothstep(((value - 0.25f) / 0.55f).coerceIn(0f, 1f)))) * shadowChromaRetention)
                     .coerceIn(0f, 1f)
                 hsv[0] = (hue + hueShift * amount).let { (it % 360f + 360f) % 360f }
                 hsv[1] = saturation + (adjustedSaturation - saturation) * amount
