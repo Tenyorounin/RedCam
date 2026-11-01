@@ -32,18 +32,19 @@ object NightBurstMerger {
             base.getPixels(reference, 0, width, 0, 0, width, height)
 
             val second = decodeUpright(frames[1], mutable = false)
-            aligned = if (second.width != width || second.height != height) {
+            val alignedFrame = if (second.width != width || second.height != height) {
                 Bitmap.createScaledBitmap(second, width, height, true).also {
                     if (it !== second) second.recycle()
                 }
             } else second
+            aligned = alignedFrame
 
-            val (dx, dy) = estimateShift(reference, aligned, width, height)
+            val (dx, dy) = estimateShift(reference, alignedFrame, width, height)
             val secondRow = IntArray(width)
             for (y in 0 until height) {
                 val sourceY = y + dy
                 if (sourceY !in 0 until height) continue
-                aligned.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
+                alignedFrame.getPixels(secondRow, 0, width, 0, sourceY, width, 1)
                 val rowOffset = y * width
                 for (x in 0 until width) {
                     val sourceX = x + dx
