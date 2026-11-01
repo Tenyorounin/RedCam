@@ -171,7 +171,6 @@ class MainActivity : ComponentActivity() {
             elevation = dp(4).toFloat()
             contentDescription = "Selected focus point"
         }
-        previewView.addView(focusIndicator, FrameLayout.LayoutParams(dp(56), dp(56)))
         imageView = ImageView(this).apply {
             scaleType = ImageView.ScaleType.FIT_CENTER
             translationY = -dp(42).toFloat()
@@ -188,6 +187,7 @@ class MainActivity : ComponentActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(processedPreviewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(imageView, FrameLayout.LayoutParams(-1, -1))
+        root.addView(focusIndicator, FrameLayout.LayoutParams(dp(56), dp(56)))
         buildNightCaptureIndicator(root)
         previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
         updateLiveLook()
@@ -508,8 +508,12 @@ class MainActivity : ComponentActivity() {
     private fun showFocusIndicator(x: Float, y: Float) {
         focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
         val size = dp(56).toFloat()
-        focusIndicator.translationX = x - size / 2f
-        focusIndicator.translationY = y - size / 2f
+        val previewLocation = IntArray(2)
+        val rootLocation = IntArray(2)
+        previewView.getLocationOnScreen(previewLocation)
+        (focusIndicator.parent as? View)?.getLocationOnScreen(rootLocation)
+        focusIndicator.translationX = previewLocation[0] - rootLocation[0] + x - size / 2f
+        focusIndicator.translationY = previewLocation[1] - rootLocation[1] + y - size / 2f
         focusIndicator.alpha = 0f
         focusIndicator.scaleX = 0.82f
         focusIndicator.scaleY = 0.82f
