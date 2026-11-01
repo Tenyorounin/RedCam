@@ -20,7 +20,9 @@ import kotlin.math.ln
 class LensZoomControl(context: Context) : LinearLayout(context) {
     private val zoomLabel = TextView(context)
     private val slider = SeekBar(context)
-    private val tickOverlay: View
+    private lateinit var tickOverlay: View
+    private lateinit var track: FrameLayout
+    private var verticalLayout = false
     private var minRatio = 1f
     private var maxRatio = 1f
     private var majorZoomStops = emptyList<Float>()
@@ -44,7 +46,7 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
         }
         addView(zoomLabel, LayoutParams(dp(46), LayoutParams.MATCH_PARENT))
 
-        val track = FrameLayout(context)
+        track = FrameLayout(context)
         addView(track, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
         slider.apply {
             max = 1000
@@ -88,21 +90,34 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
             }
             override fun onDraw(canvas: Canvas) {
                 super.onDraw(canvas)
-                val left = slider.left + slider.paddingLeft.toFloat()
-                val right = slider.right - slider.paddingRight.toFloat()
-                val width = right - left
-                if (width <= 0f) return
-                val centerY = height / 2f
-                // Fine white divisions make the continuous range readable at a glance.
-                for (progress in 0..slider.max step 50) {
-                    val x = left + width * progress / slider.max
-                    canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
-                }
-                // Mark the 1× reference, supported range limits, useful fallback
-                // steps, and all physical-lens ratios reported by this device.
-                majorZoomStops.forEach { ratio ->
-                    val x = left + width * progressAt(ratio) / slider.max
-                    canvas.drawLine(x, centerY - dp(10), x, centerY + dp(10), majorTickPaint)
+                if (verticalLayout) {
+                    val insetTop = (height - slider.width) / 2f + slider.paddingLeft
+                    val insetBottom = (height + slider.width) / 2f - slider.paddingRight
+                    val travel = insetBottom - insetTop
+                    if (travel <= 0f) return
+                    val centerX = width / 2f
+                    for (progress in 0..slider.max step 50) {
+                        val y = insetBottom - travel * progress / slider.max
+                        canvas.drawLine(centerX - dp(3), y, centerX + dp(3), y, minorTickPaint)
+                    }
+                    majorZoomStops.forEach { ratio ->
+                        val y = insetBottom - travel * progressAt(ratio) / slider.max
+                        canvas.drawLine(centerX - dp(10), y, centerX + dp(10), y, majorTickPaint)
+                    }
+                } else {
+                    val left = slider.left + slider.paddingLeft.toFloat()
+                    val right = slider.right - slider.paddingRight.toFloat()
+                    val travel = right - left
+                    if (travel <= 0f) return
+                    val centerY = height / 2f
+                    for (progress in 0..slider.max step 50) {
+                        val x = left + travel * progress / slider.max
+                        canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
+                    }
+                    majorZoomStops.forEach { ratio ->
+                        val x = left + travel * progressAt(ratio) / slider.max
+                        canvas.drawLine(x, centerY - dp(10), x, centerY + dp(10), majorTickPaint)
+                    }
                 }
             }
         }.apply {
@@ -111,6 +126,47 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         track.addView(tickOverlay, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        track.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateSliderGeometry() }
+    }
+
+    /** Switches the control between the horizontal portrait rail and vertical landscape rail. */
+    fun setVertical(vertical: Boolean) {
+        if (verticalLayout == vertical) return
+        verticalLayout = vertical
+        orientation = if (vertical) VERTICAL else HORIZONTAL
+        gravity = if (vertical) Gravity.CENTER_HORIZONTAL else Gravity.CENTER_VERTICAL
+        if (vertical) {
+            setPadding(0, dp(7), 0, dp(7))
+            zoomLabel.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, dp(34))
+            track.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
+        } else {
+            setPadding(dp(8), 0, dp(10), 0)
+            zoomLabel.layoutParams = LayoutParams(dp(46), LayoutParams.MATCH_PARENT)
+            track.layoutParams = LayoutParams(0, LayoutParams.MATCH_PARENT, 1f)
+        }
+        updateSliderGeometry()
+        requestLayout()
+        tickOverlay.invalidate()
+    }
+
+    private fun updateSliderGeometry() {
+        if (!::track.isInitialized || !::slider.isInitialized) return
+        if (verticalLayout && track.width > 0 && track.height > 0) {
+            slider.rotation = -90f
+            val wantedWidth = track.height
+            val wantedHeight = track.width
+            val params = slider.layoutParams as? FrameLayout.LayoutParams
+            if (params == null || params.width != wantedWidth || params.height != wantedHeight) {
+                slider.layoutParams = FrameLayout.LayoutParams(wantedWidth, wantedHeight, Gravity.CENTER)
+            }
+        } else if (!verticalLayout) {
+            slider.rotation = 0f
+            val params = slider.layoutParams as? FrameLayout.LayoutParams
+            if (params == null || params.width != LayoutParams.MATCH_PARENT || params.height != LayoutParams.MATCH_PARENT) {
+                slider.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            }
+        }
+        tickOverlay.invalidate()
     }
 
     fun setZoomRange(min: Float, max: Float, lensRatios: List<Float>) {
