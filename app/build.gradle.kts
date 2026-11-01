@@ -39,8 +39,8 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.4.8"
+        versionCode = 13
+        versionName = "0.4.9"
     }
 
     // Build the arm64 APK first. Other Android ABIs can be added after validating
@@ -74,3 +74,4 @@ dependencies {
     implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.22.0")
 }
+
