@@ -111,6 +111,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var finishRow: LinearLayout
     private lateinit var captureControls: LinearLayout
     private lateinit var editControls: LinearLayout
+    private lateinit var controlOverlay: FrameLayout
 
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else message("Camera permission is needed to take photos.")
@@ -128,6 +129,15 @@ class MainActivity : ComponentActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else requestCamera.launch(Manifest.permission.CAMERA)
+    }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (::controlOverlay.isInitialized) {
+            applyCameraControlLayout(newConfig.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
+            controlOverlay.requestLayout()
+            updateLiveLook()
+        }
     }
 
     private fun buildScreen() {
@@ -161,8 +171,8 @@ class MainActivity : ComponentActivity() {
         previewView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateLiveLook() }
         updateLiveLook()
 
-        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         val overlay = FrameLayout(this)
+        controlOverlay = overlay
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -187,14 +197,7 @@ class MainActivity : ComponentActivity() {
             onZoomChanged = ::selectZoom
             contentDescription = "Camera zoom slider. Yellow marks show lens changes."
         }
-        val zoomLayout = if (landscape) {
-            FrameLayout.LayoutParams(dp(280), dp(40), Gravity.START or Gravity.CENTER_VERTICAL).apply {
-                marginStart = dp(12)
-            }
-        } else {
-            FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP).apply { topMargin = dp(52) }
-        }
-        overlay.addView(zoomRow, zoomLayout)
+        overlay.addView(zoomRow, FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP))
 
         bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -349,16 +352,8 @@ class MainActivity : ComponentActivity() {
         editControls.addView(pill("Save") { savePhoto() }, LinearLayout.LayoutParams(0, dp(44), 1f))
         editControls.addView(pill("Choose another") { choosePhoto.launch("image/*") }, LinearLayout.LayoutParams(0, dp(44), 1f))
         bottom.addView(editControls)
-        val bottomLayout = if (landscape) {
-            FrameLayout.LayoutParams(dp(292), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
-                marginEnd = dp(12)
-            }
-        } else {
-            FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
-                bottomMargin = dp(12)
-            }
-        }
-        overlay.addView(bottom, bottomLayout)
+        overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        applyCameraControlLayout(resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE)
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -370,6 +365,26 @@ class MainActivity : ComponentActivity() {
         attachPreviewGestures()
         setContentView(root)
         ViewCompat.requestApplyInsets(root)
+    }
+
+    private fun applyCameraControlLayout(landscape: Boolean) {
+        if (!::zoomRow.isInitialized || !::bottomPanel.isInitialized) return
+        zoomRow.layoutParams = if (landscape) {
+            FrameLayout.LayoutParams(dp(280), dp(40), Gravity.START or Gravity.CENTER_VERTICAL).apply {
+                marginStart = dp(12)
+            }
+        } else {
+            FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP).apply { topMargin = dp(52) }
+        }
+        bottomPanel.layoutParams = if (landscape) {
+            FrameLayout.LayoutParams(dp(292), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+                marginEnd = dp(12)
+            }
+        } else {
+            FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                bottomMargin = dp(12)
+            }
+        }
     }
 
     private fun buildNightCaptureIndicator(root: FrameLayout) {
