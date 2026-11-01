@@ -106,7 +106,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var thumbnailButton: ImageButton
     private lateinit var zoomRow: LensZoomControl
     private lateinit var nightCaptureIndicator: LinearLayout
-    private lateinit var nightCaptureCaption: TextView
     private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
     private lateinit var finishRow: LinearLayout
@@ -366,8 +365,8 @@ class MainActivity : ComponentActivity() {
         nightCaptureIndicator = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(16), dp(14), dp(16), dp(12))
-            background = rounded(0xdd111216.toInt(), 22)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            background = rounded(0xdd111216.toInt(), 50)
             visibility = View.GONE
             elevation = dp(6).toFloat()
         }
@@ -375,23 +374,7 @@ class MainActivity : ComponentActivity() {
             isIndeterminate = true
             indeterminateTintList = ColorStateList.valueOf(0xffffc857.toInt())
         }
-        nightCaptureIndicator.addView(spinner, LinearLayout.LayoutParams(dp(40), dp(40)))
-        nightCaptureIndicator.addView(TextView(this).apply {
-            text = "Night capture"
-            textSize = 14f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setTextColor(0xffffd46f.toInt())
-            gravity = Gravity.CENTER
-            setPadding(0, dp(6), 0, 0)
-        })
-        nightCaptureCaption = TextView(this).apply {
-            text = "Combining frames · hold still"
-            textSize = 12f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(3), 0, 0)
-        }
-        nightCaptureIndicator.addView(nightCaptureCaption)
+        nightCaptureIndicator.addView(spinner, LinearLayout.LayoutParams(dp(44), dp(44)))
         root.addView(nightCaptureIndicator, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
         ).apply { topMargin = -dp(34) })
@@ -403,9 +386,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setNightCaptureProgress(frame: Int, total: Int) {
-        if (::nightCaptureCaption.isInitialized) {
-            nightCaptureCaption.text = "Frame $frame of $total · hold still"
-        }
+        // The centered spinner communicates the multi-frame capture without covering the viewfinder.
     }
 
     private fun attachPreviewGestures() {
