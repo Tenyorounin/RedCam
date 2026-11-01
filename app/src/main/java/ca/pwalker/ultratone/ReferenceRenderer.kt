@@ -47,7 +47,7 @@ object ReferenceRenderer {
                 histogram[(luma * 255f).toInt().coerceIn(0, 255)]++
                 val maximum = max(r, max(g, b))
                 val minimum = min(r, min(g, b))
-                saturationTotal += if (maximum <= 0.001f) 0.0 else (maximum - minimum) / maximum
+                saturationTotal += if (maximum <= 0.001f) 0.0 else ((maximum - minimum) / maximum).toDouble()
                 samples++
             }
         }
