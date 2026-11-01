@@ -48,6 +48,11 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setFloatUniform("zoomRatio", zoom.coerceAtLeast(1f))
         shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && depthBitmap != null) 1 else 0)
         updateSize()
+        // Re-attach after changing RuntimeShader uniforms so PreviewView's
+        // hardware layer redraws immediately (not on a later camera rebind).
+        view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
+        view.invalidate()
+        view.postInvalidateOnAnimation()
     }
 
     fun setFocus(x: Float, y: Float) {
