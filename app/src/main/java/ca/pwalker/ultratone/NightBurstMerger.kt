@@ -13,11 +13,24 @@ import kotlin.math.max
  */
 object NightBurstMerger {
     private const val MAX_DECODE_PIXELS = 16_000_000L
-    private const val ALIGNMENT_SCALE = 16
+    private const val ALIGNMENT_SCALE = 8
     private const val MAX_LUMA_DELTA = 24
     private const val MAX_RGB_DELTA = 72
 
     data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
+
+    /**
+     * Two-frame detail merge for the optional deblur mode. Start with whichever
+     * capture has more fine detail, then blend only aligned, stable pixels from
+     * its partner. This keeps moving edges from becoming double images.
+     */
+    fun mergeDetail(frames: List<Frame>): Bitmap {
+        require(frames.size == 2) { "Detail merge expects two captures" }
+        val firstScore = sharpnessScore(frames[0])
+        val secondScore = sharpnessScore(frames[1])
+        val referenceFirst = secondScore <= firstScore * 1.02
+        return merge(if (referenceFirst) frames else frames.reversed())
+    }
 
     fun merge(frames: List<Frame>): Bitmap {
         require(frames.size == 2) { "Night fallback expects two captures" }
@@ -68,6 +81,47 @@ object NightBurstMerger {
         }
     }
 
+    private fun sharpnessScore(frame: Frame): Double {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, bounds)
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / sample > 256) sample *= 2
+        val decoded = BitmapFactory.decodeByteArray(
+            frame.jpegBytes, 0, frame.jpegBytes.size,
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+        ) ?: return 0.0
+        val upright = if (frame.rotationDegrees % 360 != 0) {
+            Bitmap.createBitmap(
+                decoded, 0, 0, decoded.width, decoded.height,
+                android.graphics.Matrix().apply { postRotate(frame.rotationDegrees.toFloat()) }, true
+            ).also { if (it !== decoded) decoded.recycle() }
+        } else decoded
+        try {
+            val pixels = IntArray(upright.width * upright.height)
+            upright.getPixels(pixels, 0, upright.width, 0, 0, upright.width, upright.height)
+            var score = 0L
+            var count = 0
+            for (y in 1 until upright.height - 1) {
+                val row = y * upright.width
+                for (x in 1 until upright.width - 1) {
+                    val center = luma(pixels[row + x])
+                    if (center !in 12..243) continue
+                    val laplacian = 4 * center - luma(pixels[row + x - 1]) -
+                        luma(pixels[row + x + 1]) - luma(pixels[row - upright.width + x]) -
+                        luma(pixels[row + upright.width + x])
+                    score += abs(laplacian)
+                    count++
+                }
+            }
+            return if (count == 0) 0.0 else score.toDouble() / count
+        } finally {
+            upright.recycle()
+        }
+    }
+
     private fun decodeUpright(frame: Frame, mutable: Boolean): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, bounds)
@@ -105,7 +159,7 @@ object NightBurstMerger {
         val top = smallHeight / 8
         val bottom = smallHeight * 7 / 8
         val stride = 4
-        for (dy in -3..3) for (dx in -3..3) {
+        for (dy in -4..4) for (dx in -4..4) {
             var cost = 0.0
             var count = 0
             var y = top
