@@ -30,6 +30,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
@@ -48,6 +49,7 @@ import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.Observer
 import java.io.File
 import java.nio.ByteBuffer
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -99,6 +101,7 @@ class MainActivity : ComponentActivity() {
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
     private val zoomButtons = mutableMapOf<Float, TextView>()
+    private data class ZoomStop(val ratio: Float, val label: String, val description: String)
     private lateinit var flashButton: TextView
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
@@ -129,7 +132,9 @@ class MainActivity : ComponentActivity() {
     private fun buildScreen() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         previewView = PreviewView(this).apply {
-            scaleType = PreviewView.ScaleType.FILL_CENTER
+            // Show the whole camera frame. FILL_CENTER cropped the tall-screen
+            // preview, making 1x look close to 2x while saved JPEGs stayed wide.
+            scaleType = PreviewView.ScaleType.FIT_CENTER
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             contentDescription = "Live camera viewfinder. Tap to focus; pinch to zoom."
         }
@@ -140,7 +145,8 @@ class MainActivity : ComponentActivity() {
             contentDescription = "Selected photo preview"
         }
         processedPreviewView = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            // Keep the processed fallback preview framed like the saved full frame.
+            scaleType = ImageView.ScaleType.FIT_CENTER
             visibility = View.GONE
             contentDescription = "Live viewfinder with selected photo processing"
         }
@@ -182,12 +188,6 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(12), dp(12), dp(10))
         }
         zoomRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        listOf(0.5f, 1f, 2f, 5f).forEach { ratio ->
-            val label = when (ratio) { 0.5f -> "0.5×"; else -> "${ratio.toInt()}×" }
-            val item = pill(label) { selectZoom(ratio) }
-            zoomButtons[ratio] = item
-            zoomRow.addView(item, LinearLayout.LayoutParams(0, dp(38), 1f).apply { marginEnd = dp(4) })
-        }
         bottom.addView(zoomRow)
 
         modeRow = LinearLayout(this).apply {
@@ -410,8 +410,12 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { }
         }
         try {
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            val capture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            // Request the same sensor aspect ratio for preview, stills and analysis.
+            // FIT_CENTER then shows the complete 4:3 sensor frame on tall screens.
+            val preview = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+            val capture = ImageCapture.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                 .setFlashMode(flashMode).build()
             val analysis = ImageAnalysis.Builder()
                 // The processed feed is only a live view; full-resolution stills
@@ -450,6 +454,7 @@ class MainActivity : ComponentActivity() {
             imageCapture = capture
             imageAnalysis = if (live) analysis else null
             boundCamera = camera
+            configureZoomStops(camera?.cameraInfo)
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
             cameraModeNote = when (activeMode) {
@@ -492,6 +497,63 @@ class MainActivity : ComponentActivity() {
         zoomObserver = observer
         camera.cameraInfo.zoomState.observe(this, observer)
     }
+
+    /** Build lens buttons from the camera capabilities Android exposes for this device. */
+    private fun configureZoomStops(cameraInfo: androidx.camera.core.CameraInfo?) {
+        zoomRow.removeAllViews()
+        zoomButtons.clear()
+        if (cameraInfo == null) return
+        val physicalStops = try {
+            cameraInfo.physicalCameraInfos.mapNotNull { info ->
+                info.intrinsicZoomRatio.takeIf { it.isFinite() && it > 0f }
+            }
+        } catch (_: Exception) { emptyList() }
+        val stops = mutableListOf<ZoomStop>()
+        physicalStops.forEach { ratio ->
+            if (stops.none { kotlin.math.abs(it.ratio - ratio) < 0.08f }) {
+                val label = when {
+                    ratio < 0.92f -> "${formatZoom(ratio)}× UW"
+                    ratio > 1.08f -> "${formatZoom(ratio)}× Tele"
+                    else -> "1×"
+                }
+                val description = when {
+                    ratio < 0.92f -> "Ultra-wide lens, approximately ${formatZoom(ratio)} times"
+                    ratio > 1.08f -> "Telephoto lens, approximately ${formatZoom(ratio)} times"
+                    else -> "Main camera lens, 1 times"
+                }
+                stops += ZoomStop(ratio, label, description)
+            }
+        }
+        if (stops.isEmpty()) {
+            // Some camera providers expose only a logical camera and no physical
+            // lens inventory. Offer only values supported by its reported range.
+            val state = cameraInfo.zoomState.value
+            if (state != null) {
+                val candidates = listOf(state.minZoomRatio, 1f, state.maxZoomRatio)
+                    .filter { it >= state.minZoomRatio - 0.02f && it <= state.maxZoomRatio + 0.02f }
+                    .distinctBy { (it * 20).toInt() }
+                    .sorted()
+                candidates.forEach { ratio ->
+                    if (stops.none { kotlin.math.abs(it.ratio - ratio) < 0.08f }) {
+                        stops += ZoomStop(ratio, "${formatZoom(ratio)}×", "Camera zoom ${formatZoom(ratio)} times")
+                    }
+                }
+            }
+        }
+        stops.sortedBy { it.ratio }.forEach { stop ->
+            val button = pill(stop.label) { selectZoom(stop.ratio) }.apply {
+                contentDescription = stop.description
+                textSize = 12f
+            }
+            zoomButtons[stop.ratio] = button
+            zoomRow.addView(button, LinearLayout.LayoutParams(0, dp(38), 1f).apply {
+                marginStart = dp(3); marginEnd = dp(3)
+            })
+        }
+    }
+
+    private fun formatZoom(value: Float): String =
+        String.format(Locale.US, if (value % 1f == 0f) "%.0f" else "%.1f", value)
 
     private fun updateExposureControl(show: Boolean) {
         if (!show) { exposureRow.visibility = View.GONE; return }
@@ -953,22 +1015,19 @@ class MainActivity : ComponentActivity() {
         return BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
     }
 
-    /** Undo PreviewView's FILL_CENTER crop when mapping a tap onto the captured frame. */
+    /** Map a tap through PreviewView's FIT_CENTER letterboxing onto the full captured frame. */
     private fun mapFocusToFrame(
         x: Float, y: Float, viewWidth: Int, viewHeight: Int,
         frameWidth: Int, frameHeight: Int, mirrored: Boolean
     ): Pair<Float, Float> {
-        val viewAspect = viewWidth.coerceAtLeast(1).toFloat() / viewHeight.coerceAtLeast(1)
-        val frameAspect = frameWidth.coerceAtLeast(1).toFloat() / frameHeight.coerceAtLeast(1)
-        var mappedX = x.coerceIn(0f, 1f)
-        var mappedY = y.coerceIn(0f, 1f)
-        if (frameAspect > viewAspect) {
-            val visibleFraction = viewAspect / frameAspect
-            mappedX = (0.5f + (mappedX - 0.5f) * visibleFraction).coerceIn(0f, 1f)
-        } else {
-            val visibleFraction = frameAspect / viewAspect
-            mappedY = (0.5f + (mappedY - 0.5f) * visibleFraction).coerceIn(0f, 1f)
-        }
+        val scale = minOf(viewWidth.coerceAtLeast(1) / frameWidth.coerceAtLeast(1).toFloat(),
+            viewHeight.coerceAtLeast(1) / frameHeight.coerceAtLeast(1).toFloat())
+        val renderedWidth = frameWidth * scale
+        val renderedHeight = frameHeight * scale
+        val offsetX = (viewWidth - renderedWidth) / 2f
+        val offsetY = (viewHeight - renderedHeight) / 2f
+        var mappedX = ((x * viewWidth - offsetX) / renderedWidth.coerceAtLeast(1f)).coerceIn(0f, 1f)
+        var mappedY = ((y * viewHeight - offsetY) / renderedHeight.coerceAtLeast(1f)).coerceIn(0f, 1f)
         if (mirrored) mappedX = 1f - mappedX
         return mappedX to mappedY
     }
