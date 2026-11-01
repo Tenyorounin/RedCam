@@ -63,9 +63,15 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
         }
         track.addView(slider, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         tickOverlay = object : View(context) {
-            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            private val minorTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                strokeWidth = dp(1).toFloat()
+                strokeCap = Paint.Cap.ROUND
+                alpha = 205
+            }
+            private val majorTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0xffffc857.toInt()
-                strokeWidth = dp(2).toFloat()
+                strokeWidth = dp(3).toFloat()
                 strokeCap = Paint.Cap.ROUND
             }
             override fun onDraw(canvas: Canvas) {
@@ -75,10 +81,16 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                 val width = right - left
                 if (width <= 0f || maxRatio <= minRatio) return
                 val centerY = height / 2f
+                // Fine white divisions make the continuous range readable at a glance.
+                for (progress in 0..slider.max step 50) {
+                    val x = left + width * progress / slider.max
+                    canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
+                }
+                // Lens handoff points are more prominent and reflect this phone's camera.
                 lensSwitchRatios.forEach { ratio ->
                     if (ratio < minRatio || ratio > maxRatio) return@forEach
                     val x = left + width * progressAt(ratio) / slider.max
-                    canvas.drawLine(x, centerY - dp(6), x, centerY + dp(6), paint)
+                    canvas.drawLine(x, centerY - dp(8), x, centerY + dp(8), majorTickPaint)
                 }
             }
         }.apply {
