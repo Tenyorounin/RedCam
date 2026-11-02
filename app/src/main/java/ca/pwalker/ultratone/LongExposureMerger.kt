@@ -163,5 +163,5 @@ internal class LongExposureMerger {
     private fun luma(color: Int): Int =
         (54 * (color ushr 16 and 0xff) + 183 * (color ushr 8 and 0xff) + 19 * (color and 0xff)) shr 8
 
-    private companion object { const val MAX_PIXELS = 4_000_000L }
+    private companion object { const val MAX_PIXELS = 8_000_000L }
 }
