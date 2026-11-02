@@ -6,11 +6,14 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
@@ -86,7 +89,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var nightEnhancementEnabled = false
     @Volatile private var infinityFocusEnabled = false
     @Volatile private var glowEnabled = false
-    @Volatile private var flareEnabled = false
+    private lateinit var moreMenuPanel: LinearLayout
     @Volatile private var vignetteEnabled = false
     private var infinityFocusSupported = false
     private var manualLensFocusSupported = false
@@ -103,6 +106,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var photoProcessingExecutor: ExecutorService
     private val previewBitmapRetireHandler = Handler(Looper.getMainLooper())
     private var imageCapture: ImageCapture? = null
+    private var previewUseCase: Preview? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var extensionsManager: ExtensionsManager? = null
@@ -168,7 +172,6 @@ class MainActivity : ComponentActivity() {
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
         glowEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_glow", false)
-        flareEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_flare", false)
         vignetteEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_vignette", false)
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
@@ -324,7 +327,6 @@ class MainActivity : ComponentActivity() {
             })
         }
         strengthRow.addView(strength, LinearLayout.LayoutParams(0, dp(36), 1f))
-        bottom.addView(strengthRow)
 
         exposureRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -353,7 +355,6 @@ class MainActivity : ComponentActivity() {
             })
         }
         exposureRow.addView(exposure, LinearLayout.LayoutParams(0, dp(36), 1f))
-        bottom.addView(exposureRow)
 
         detailMergeButton = pill("") { toggleMultiFrameDetail() }.apply {
             visibility = View.GONE
@@ -361,12 +362,6 @@ class MainActivity : ComponentActivity() {
             maxLines = 1
             contentDescription = "Two-frame deblur and detail merge. Off"
         }
-        bottom.addView(detailMergeButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
-        ).apply {
-            topMargin = dp(2)
-            bottomMargin = dp(2)
-        })
         updateDetailMergeButton()
 
         nightEnhancementButton = pill("") { toggleNightEnhancement() }.apply {
@@ -375,9 +370,6 @@ class MainActivity : ComponentActivity() {
             maxLines = 1
             contentDescription = "Night-only low-light enhancement. Off"
         }
-        bottom.addView(nightEnhancementButton, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
-        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         updateNightEnhancementButton()
 
         creativeEffectsRow = LinearLayout(this).apply {
@@ -385,7 +377,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
-        listOf("glow", "flare", "vignette").forEach { effect ->
+        listOf("glow", "vignette").forEach { effect ->
             val button = pill(effectLabel(effect)) { toggleCreativeEffect(effect) }.apply {
                 textSize = 11f
                 maxLines = 1
@@ -396,9 +388,6 @@ class MainActivity : ComponentActivity() {
                 marginStart = dp(2); marginEnd = dp(2)
             })
         }
-        bottom.addView(creativeEffectsRow, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
-        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         updateCreativeEffectButtons()
 
         captureControls = LinearLayout(this).apply {
@@ -459,7 +448,27 @@ class MainActivity : ComponentActivity() {
         editControls.addView(pill("Save") { savePhoto() }, LinearLayout.LayoutParams(0, dp(44), 1f))
         editControls.addView(pill("Choose another") { choosePhoto.launch("image/*") }, LinearLayout.LayoutParams(0, dp(44), 1f))
         bottom.addView(editControls)
+        moreMenuPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = rounded(0xee111216.toInt(), 20)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+        }
+        moreMenuPanel.addView(strengthRow)
+        moreMenuPanel.addView(exposureRow)
+        moreMenuPanel.addView(detailMergeButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        moreMenuPanel.addView(nightEnhancementButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        moreMenuPanel.addView(creativeEffectsRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        overlay.addView(moreMenuPanel)
         landscapeActions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -500,6 +509,19 @@ class MainActivity : ComponentActivity() {
         } else {
             FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
                 bottomMargin = dp(12)
+            }
+        }
+        if (::moreMenuPanel.isInitialized) {
+            moreMenuPanel.layoutParams = if (landscape) {
+                FrameLayout.LayoutParams(dp(250), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START or Gravity.CENTER_VERTICAL).apply {
+                    marginStart = dp(72)
+                }
+            } else {
+                FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+                    leftMargin = dp(12)
+                    rightMargin = dp(12)
+                    bottomMargin = dp(124)
+                }
             }
         }
         applyControlSizing(landscape)
@@ -571,6 +593,11 @@ class MainActivity : ComponentActivity() {
         val previewX = sourceLocation[0] - previewLocation[0] + x
         val previewY = sourceLocation[1] - previewLocation[1] + y
         if (previewX !in 0f..previewView.width.toFloat() || previewY !in 0f..previewView.height.toFloat()) return
+        val sourceAspect = if (source === processedPreviewView) {
+            processedPreviewBitmap?.let { it.width.toFloat() / it.height.coerceAtLeast(1) } ?: previewContentAspectRatio()
+        } else previewContentAspectRatio()
+        val contentRect = fitCenterContentRect(previewView.width, previewView.height, sourceAspect) ?: return
+        if (!contentRect.contains(previewX, previewY)) return
 
         focusX = (previewX / previewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
         focusY = (previewY / previewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
@@ -585,6 +612,30 @@ class MainActivity : ComponentActivity() {
             boundCamera?.cameraControl?.startFocusAndMetering(action)
         } catch (_: Exception) { }
         source.performClick()
+    }
+
+    private fun previewContentAspectRatio(): Float {
+        val info = previewUseCase?.resolutionInfo
+        if (info != null) {
+            val width = info.resolution.width.toFloat().coerceAtLeast(1f)
+            val height = info.resolution.height.toFloat().coerceAtLeast(1f)
+            return if (info.rotationDegrees == 90 || info.rotationDegrees == 270) height / width else width / height
+        }
+        return if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 4f / 3f else 3f / 4f
+    }
+
+    private fun fitCenterContentRect(width: Int, height: Int, aspect: Float): RectF? {
+        if (width <= 0 || height <= 0 || aspect <= 0f) return null
+        val viewAspect = width.toFloat() / height
+        return if (viewAspect > aspect) {
+            val contentWidth = height * aspect
+            val left = (width - contentWidth) / 2f
+            RectF(left, 0f, left + contentWidth, height.toFloat())
+        } else {
+            val contentHeight = width / aspect
+            val top = (height - contentHeight) / 2f
+            RectF(0f, top, width.toFloat(), top + contentHeight)
+        }
     }
 
     private fun toggleInfinityFocus() {
@@ -781,7 +832,10 @@ class MainActivity : ComponentActivity() {
             // Bind the vendor Night pipeline without analysis so it isn't silently
             // rejected and replaced by our software fallback.
             fun newPreview() = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                .build().also {
+                    previewUseCase = it
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
             fun newCapture(mode: Int): ImageCapture {
                 val builder = ImageCapture.Builder()
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
@@ -804,6 +858,7 @@ class MainActivity : ComponentActivity() {
                 .build()
 
             provider.unbindAll()
+            previewUseCase = null
             var camera: Camera? = null
             var capture: ImageCapture? = null
             var analysis: ImageAnalysis? = null
@@ -1197,21 +1252,16 @@ class MainActivity : ComponentActivity() {
 
     private fun effectLabel(effect: String) = when (effect) {
         "glow" -> "Glow"
-        "flare" -> "Flare"
         else -> "Vignette"
     }
 
-    private fun currentEffects() = ReferenceRenderer.Effects(glowEnabled, flareEnabled, vignetteEnabled)
+    private fun currentEffects() = ReferenceRenderer.Effects(glowEnabled, vignetteEnabled)
 
     private fun toggleCreativeEffect(effect: String) {
         when (effect) {
             "glow" -> {
                 glowEnabled = !glowEnabled
                 getPreferences(MODE_PRIVATE).edit().putBoolean("effect_glow", glowEnabled).apply()
-            }
-            "flare" -> {
-                flareEnabled = !flareEnabled
-                getPreferences(MODE_PRIVATE).edit().putBoolean("effect_flare", flareEnabled).apply()
             }
             "vignette" -> {
                 vignetteEnabled = !vignetteEnabled
@@ -1228,7 +1278,6 @@ class MainActivity : ComponentActivity() {
         creativeEffectButtons.forEach { (effect, button) ->
             val enabled = when (effect) {
                 "glow" -> glowEnabled
-                "flare" -> flareEnabled
                 else -> vignetteEnabled
             }
             button.text = "${effectLabel(effect)} ${if (enabled) "On" else "Off"}"
@@ -1250,6 +1299,7 @@ class MainActivity : ComponentActivity() {
     private fun updateMoreMenu() {
         if (!::detailMergeButton.isInitialized || !::nightEnhancementButton.isInitialized) return
         val show = moreMenuExpanded && previewView.visibility == View.VISIBLE
+        if (::moreMenuPanel.isInitialized) moreMenuPanel.visibility = if (show) View.VISIBLE else View.GONE
         strengthRow.visibility = if (show) View.VISIBLE else View.GONE
         detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
         nightEnhancementButton.visibility = if (show && activeMode == ReferenceRenderer.Mode.NIGHT) View.VISIBLE else View.GONE
@@ -1449,78 +1499,51 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showPolaroidFeedback() {
-        if (!::photoFeedbackLayer.isInitialized || !::shutterButton.isInitialized ||
-            photoFeedbackLayer.width == 0 || !::thumbnailButton.isInitialized) return
-        val layer = photoFeedbackLayer
-        val flash = View(this).apply {
-            setBackgroundColor(Color.WHITE)
-            alpha = 0f
+        if (!::photoFeedbackLayer.isInitialized || photoFeedbackLayer.width == 0) return
+        val activePreview = when {
+            processedPreviewView.visibility == View.VISIBLE -> processedPreviewView
+            previewView.visibility == View.VISIBLE -> previewView
+            else -> return
+        }
+        val frame = object : View(this) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                val aspect = if (activePreview === processedPreviewView) {
+                    processedPreviewBitmap?.let { it.width.toFloat() / it.height.coerceAtLeast(1) }
+                        ?: previewContentAspectRatio()
+                } else previewContentAspectRatio()
+                val rect = fitCenterContentRect(activePreview.width, activePreview.height, aspect) ?: return
+                val previewLocation = IntArray(2)
+                val layerLocation = IntArray(2)
+                activePreview.getLocationOnScreen(previewLocation)
+                photoFeedbackLayer.getLocationOnScreen(layerLocation)
+                rect.offset(
+                    (previewLocation[0] - layerLocation[0]).toFloat(),
+                    (previewLocation[1] - layerLocation[1]).toFloat()
+                )
+                val edge = dp(5).toFloat()
+                val bottomEdge = dp(23).toFloat()
+                canvas.drawRect(rect.left, rect.top, rect.right, rect.top + edge, paint)
+                canvas.drawRect(rect.left, rect.top, rect.left + edge, rect.bottom, paint)
+                canvas.drawRect(rect.right - edge, rect.top, rect.right, rect.bottom, paint)
+                canvas.drawRect(rect.left, rect.bottom - bottomEdge, rect.right, rect.bottom, paint)
+            }
+        }.apply {
+            setWillNotDraw(false)
             isClickable = false
+            isFocusable = false
         }
-        layer.addView(flash, FrameLayout.LayoutParams(-1, -1))
-        flash.animate().alpha(0.68f).setDuration(45L).withEndAction {
-            flash.animate().alpha(0f).setDuration(170L).withEndAction { layer.removeView(flash) }.start()
-        }.start()
-
-        val cardWidth = dp(62)
-        val cardHeight = dp(76)
-        val card = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                cornerRadius = dp(3).toFloat()
-            }
-            elevation = dp(8).toFloat()
-            alpha = 0f
-            scaleX = 0.72f
-            scaleY = 0.72f
-            rotation = -8f
-        }
-        val image = View(this).apply {
-            background = GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                intArrayOf(0xff173f41.toInt(), 0xffe1a65c.toInt(), 0xff6d352e.toInt())
-            ).apply { cornerRadius = dp(2).toFloat() }
-        }
-        card.addView(image, FrameLayout.LayoutParams(cardWidth - dp(10), dp(52), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
-            topMargin = dp(5)
-        })
-        val captionMark = View(this).apply {
-            background = rounded(0xffd4d4d4.toInt(), 4)
-        }
-        card.addView(captionMark, FrameLayout.LayoutParams(dp(20), dp(2), Gravity.BOTTOM or Gravity.START).apply {
-            leftMargin = dp(6)
-            bottomMargin = dp(6)
-        })
-        layer.addView(card, FrameLayout.LayoutParams(cardWidth, cardHeight, Gravity.TOP or Gravity.START))
-
-        val layerLocation = IntArray(2)
-        val shutterLocation = IntArray(2)
-        val albumLocation = IntArray(2)
-        layer.getLocationOnScreen(layerLocation)
-        shutterButton.getLocationOnScreen(shutterLocation)
-        thumbnailButton.getLocationOnScreen(albumLocation)
-        val startX = shutterLocation[0] - layerLocation[0] + (shutterButton.width - cardWidth) / 2f
-        val startY = shutterLocation[1] - layerLocation[1] + (shutterButton.height - cardHeight) / 2f
-        val endX = albumLocation[0] - layerLocation[0] + (thumbnailButton.width - cardWidth) / 2f
-        val endY = albumLocation[1] - layerLocation[1] + (thumbnailButton.height - cardHeight) / 2f
-        card.translationX = startX
-        card.translationY = startY
-        card.animate()
-            .alpha(1f)
-            .scaleX(1f)
-            .scaleY(1f)
-            .setDuration(90L)
-            .withEndAction {
-                card.animate()
-                    .translationX(endX)
-                    .translationY(endY)
-                    .scaleX(0.34f)
-                    .scaleY(0.34f)
-                    .alpha(0.05f)
-                    .setDuration(520L)
-                    .withEndAction { layer.removeView(card) }
-                    .start()
-            }
+        photoFeedbackLayer.removeAllViews()
+        photoFeedbackLayer.addView(frame, FrameLayout.LayoutParams(-1, -1))
+        activePreview.animate().cancel()
+        activePreview.scaleX = 1f
+        activePreview.scaleY = 1f
+        activePreview.animate().scaleX(0.965f).scaleY(0.965f).setDuration(95L)
+            .withEndAction { activePreview.animate().scaleX(1f).scaleY(1f).setDuration(155L).start() }
+            .start()
+        frame.animate().alpha(0f).setStartDelay(95L).setDuration(160L)
+            .withEndAction { photoFeedbackLayer.removeView(frame) }
             .start()
     }
 

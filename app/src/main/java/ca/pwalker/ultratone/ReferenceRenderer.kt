@@ -13,7 +13,6 @@ object ReferenceRenderer {
 
     data class Effects(
         val glow: Boolean = false,
-        val flare: Boolean = false,
         val vignette: Boolean = false
     )
 
@@ -38,8 +37,7 @@ object ReferenceRenderer {
         val sunset = mode == Mode.SUNSET
         val haloX = max(1, width / 150)
         val haloY = max(1, height / 150)
-        val flareX = max(1, width / 12)
-        val needHaloRows = effects.glow || effects.flare
+        val needHaloRows = effects.glow
 
         for (y in 0 until height) {
             source.getPixels(input, 0, width, 0, y, width, 1)
@@ -98,7 +96,7 @@ object ReferenceRenderer {
                     }
                 }
 
-                if (effects.glow || effects.flare) {
+                if (effects.glow) {
                     val left = input[(x - haloX).coerceAtLeast(0)]
                     val right = input[(x + haloX).coerceAtMost(width - 1)]
                     val glowSource = max(
@@ -110,16 +108,6 @@ object ReferenceRenderer {
                         nr += bloom
                         ng += bloom * 0.98f
                         nb += bloom * 0.92f
-                    }
-                    if (effects.flare) {
-                        val flareSource = max(
-                            lumaOf(input[(x - flareX).coerceAtLeast(0)]),
-                            lumaOf(input[(x + flareX).coerceAtMost(width - 1)])
-                        )
-                        val streak = smoothstep(0.84f, 0.995f, flareSource) * 0.105f
-                        nr += streak
-                        ng += streak * 0.78f
-                        nb += streak * 0.46f
                     }
                 }
 

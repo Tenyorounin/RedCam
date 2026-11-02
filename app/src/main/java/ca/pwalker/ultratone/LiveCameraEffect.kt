@@ -30,7 +30,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("monochrome", 0)
         shader.setIntUniform("depthEnabled", 0)
         shader.setIntUniform("glowEnabled", 0)
-        shader.setIntUniform("flareEnabled", 0)
         shader.setIntUniform("vignetteEnabled", 0)
         shader.setFloatUniform("viewSize", 1f, 1f)
         shader.setFloatUniform("depthScale", 1f, 1f)
@@ -57,7 +56,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             ReferenceRenderer.Mode.LANDSCAPE -> 5
         })
         shader.setIntUniform("glowEnabled", if (effects.glow) 1 else 0)
-        shader.setIntUniform("flareEnabled", if (effects.flare) 1 else 0)
         shader.setIntUniform("vignetteEnabled", if (effects.vignette) 1 else 0)
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
         shader.setIntUniform("nightEnhancement", if (nightEnhancement && mode == ReferenceRenderer.Mode.NIGHT) 1 else 0)
@@ -145,7 +143,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform int nightEnhancement;
             uniform int depthEnabled;
             uniform int glowEnabled;
-            uniform int flareEnabled;
             uniform int vignetteEnabled;
             uniform float2 viewSize;
             uniform float2 depthScale;
@@ -238,7 +235,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     rgb = mix(rgb, softened, blur);
                 }
                 float3 result = grade(rgb);
-                if (glowEnabled == 1 || flareEnabled == 1) {
+                if (glowEnabled == 1) {
                     float2 haloOffset = max(viewSize / 150.0, float2(1.0));
                     float halo = max(
                         max(lumaOf(cameraImage.eval(p + float2(haloOffset.x, 0.0)).rgb),
@@ -249,15 +246,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     if (glowEnabled == 1) {
                         float bloom = smoothstep(0.68, 0.97, halo) * 0.075;
                         result += float3(bloom, bloom * 0.98, bloom * 0.92);
-                    }
-                    if (flareEnabled == 1) {
-                        float flareOffset = viewSize.x / 12.0;
-                        float flareSource = max(
-                            lumaOf(cameraImage.eval(p + float2(flareOffset, 0.0)).rgb),
-                            lumaOf(cameraImage.eval(p - float2(flareOffset, 0.0)).rgb)
-                        );
-                        float streak = smoothstep(0.84, 0.995, flareSource) * 0.105;
-                        result += float3(streak, streak * 0.78, streak * 0.46);
                     }
                 }
                 if (vignetteEnabled == 1) {
