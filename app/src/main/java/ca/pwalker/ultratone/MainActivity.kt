@@ -19,6 +19,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Size
 import android.view.Gravity
@@ -70,6 +71,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
+    private companion object {
+        const val MAX_LONG_EXPOSURE_MILLIS = 30_000L
+        const val LONG_EXPOSURE_TICK_MILLIS = 200L
+    }
+
     private lateinit var previewView: PreviewView
     private lateinit var processedPreviewView: ImageView
     private lateinit var imageView: ImageView
@@ -105,6 +111,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var analysisExecutor: ExecutorService
     private lateinit var photoProcessingExecutor: ExecutorService
     private val previewBitmapRetireHandler = Handler(Looper.getMainLooper())
+    private val longExposureHandler = Handler(Looper.getMainLooper())
     private var imageCapture: ImageCapture? = null
     private var previewUseCase: Preview? = null
     private var imageAnalysis: ImageAnalysis? = null
@@ -153,8 +160,36 @@ class MainActivity : ComponentActivity() {
     private lateinit var landscapeActions: LinearLayout
     private lateinit var moreButton: TextView
     private var landscapeControlsActive: Boolean? = null
-    private data class LongExposureSettings(val exposureTimeNanos: Long, val sensitivityIso: Int, val frameDurationNanos: Long)
-    private var longExposureSettings: LongExposureSettings? = null
+    private data class LongExposureCaptureContext(
+        val zoom: Float,
+        val focusX: Float,
+        val focusY: Float,
+        val facing: Int,
+        val strength: Float,
+        val finish: ReferenceRenderer.Finish,
+        val infinityFocus: Boolean,
+        val effects: ReferenceRenderer.Effects
+    )
+    private var longExposureHoldActive = false
+    private var longExposureFrameCaptureInFlight = false
+    private var longExposureFrameProcessing = false
+    private var longExposureFinalizing = false
+    private var longExposureStartedAtMs = 0L
+    private var longExposureFrameCount = 0
+    private var longExposureAccumulator: LongExposureMerger? = null
+    private var longExposureContext: LongExposureCaptureContext? = null
+    private val longExposureTicker = object : Runnable {
+        override fun run() {
+            if (!longExposureHoldActive) return
+            val elapsed = SystemClock.elapsedRealtime() - longExposureStartedAtMs
+            if (elapsed >= MAX_LONG_EXPOSURE_MILLIS) {
+                finishLongExposureHold(limitReached = true)
+                return
+            }
+            setStatusMessage("Long exposure · ${"%.1f".format(elapsed / 1000f)} s · $longExposureFrameCount frames")
+            longExposureHandler.postDelayed(this, LONG_EXPOSURE_TICK_MILLIS)
+        }
+    }
 
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else message("Camera permission is needed to take photos.")
@@ -419,11 +454,26 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(6), dp(6), dp(6), dp(6))
             foreground = roundedStroke(0x00000000, Color.WHITE, 3, 50)
             setOnTouchListener { view, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.88f).scaleY(0.88f).setDuration(75L).start()
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate().scaleX(1f).scaleY(1f).setDuration(130L).start()
+                if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE || longExposureHoldActive) {
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            view.animate().scaleX(0.88f).scaleY(0.88f).setDuration(75L).start()
+                            performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
+                            startLongExposureHold()
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                            view.animate().scaleX(1f).scaleY(1f).setDuration(130L).start()
+                            finishLongExposureHold()
+                        }
+                    }
+                    true
+                } else {
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> view.animate().scaleX(0.88f).scaleY(0.88f).setDuration(75L).start()
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> view.animate().scaleX(1f).scaleY(1f).setDuration(130L).start()
+                    }
+                    false
                 }
-                false
             }
             setOnClickListener {
                 performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK)
@@ -653,23 +703,6 @@ class MainActivity : ComponentActivity() {
         else applyInfinityFocus(infinityFocusEnabled)
     }
 
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun getLongExposureSettings(cameraInfo: CameraInfo?): LongExposureSettings? {
-        return try {
-            val info = cameraInfo ?: return null
-            val camera2 = Camera2CameraInfo.from(info)
-            val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
-            if (capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) != true) return null
-            val exposureRange = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: return null
-            val sensitivityRange = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: return null
-            val maxFrame = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION) ?: exposureRange.upper
-            val maximumDuration = minOf(exposureRange.upper, maxFrame, 4_000_000_000L)
-            val duration = maximumDuration.coerceAtLeast(exposureRange.lower)
-            if (duration < 100_000_000L) return null
-            LongExposureSettings(duration, sensitivityRange.lower, duration)
-        } catch (_: Exception) { null }
-    }
-
     private fun updateInfinityFocusSupport(cameraInfo: CameraInfo?) {
         infinityFocusSupported = false
         manualLensFocusSupported = false
@@ -827,7 +860,6 @@ class MainActivity : ComponentActivity() {
             } catch (_: Exception) { }
         }
         try {
-            longExposureSettings = getLongExposureSettings(try { provider.getCameraInfo(baseSelector) } catch (_: Exception) { null })
             // CameraX extensions support Preview and ImageCapture, not ImageAnalysis.
             // Bind the vendor Night pipeline without analysis so it isn't silently
             // rejected and replaced by our software fallback.
@@ -841,14 +873,6 @@ class MainActivity : ComponentActivity() {
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setCaptureMode(mode)
                     .setFlashMode(if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) ImageCapture.FLASH_MODE_OFF else flashMode)
-                val settings = longExposureSettings
-                if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE && settings != null) {
-                    Camera2Interop.Extender(builder)
-                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
-                        .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, settings.exposureTimeNanos)
-                        .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, settings.sensitivityIso)
-                        .setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, settings.frameDurationNanos)
-                }
                 return builder.build()
             }
             fun newAnalysis() = ImageAnalysis.Builder()
@@ -882,6 +906,7 @@ class MainActivity : ComponentActivity() {
                 // Keep normal captures at max quality. The software night burst
                 // uses ZSL when flash is off; CameraX falls back if unsupported.
                 val baseCaptureMode = when {
+                    activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     activeMode != ReferenceRenderer.Mode.NIGHT -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                     flashMode == ImageCapture.FLASH_MODE_OFF -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
                     else -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -1128,6 +1153,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun selectMode(mode: ReferenceRenderer.Mode) {
+        if (longExposureHoldActive) return
         activeMode = mode
         updateFlashButtonAvailability()
         updateLiveLook()
@@ -1315,12 +1341,174 @@ class MainActivity : ComponentActivity() {
             button.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
             button.alpha = if (selected) 1f else 0.72f
         }
+        if (::shutterButton.isInitialized) {
+            shutterButton.contentDescription = if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
+                "Hold shutter to capture a longer exposure; release to save"
+            } else {
+                "Take photo with the selected ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} style"
+            }
+        }
+    }
+
+    private fun startLongExposureHold() {
+        if (longExposureHoldActive) return
+        if (isBusy) return
+        if (pendingPhotoCount >= maxPendingPhotos) {
+            message("Photo queue is full; wait for a save to finish.")
+            return
+        }
+        if (imageCapture == null) {
+            message("Camera is starting. Try again in a moment.")
+            return
+        }
+        longExposureHoldActive = true
+        longExposureFrameCaptureInFlight = false
+        longExposureFrameProcessing = false
+        longExposureFinalizing = false
+        longExposureStartedAtMs = SystemClock.elapsedRealtime()
+        longExposureFrameCount = 0
+        longExposureAccumulator = LongExposureMerger()
+        longExposureContext = LongExposureCaptureContext(
+            currentZoomRatio, focusX, focusY, lensFacing, styleStrength, activeFinish,
+            infinityFocusEnabled, currentEffects()
+        )
+        isBusy = true
+        pendingPhotoCount++
+        setStatusMessage("Long exposure · 0.0 s · hold shutter")
+        longExposureHandler.removeCallbacks(longExposureTicker)
+        longExposureHandler.postDelayed(longExposureTicker, LONG_EXPOSURE_TICK_MILLIS)
+        captureLongExposureFrame()
+    }
+
+    private fun captureLongExposureFrame() {
+        if (!longExposureHoldActive || longExposureFrameCaptureInFlight || longExposureFrameProcessing) return
+        val capture = imageCapture
+        if (capture == null) {
+            stopLongExposureAfterCaptureError("Camera stopped during long exposure.")
+            return
+        }
+        longExposureFrameCaptureInFlight = true
+        capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(image: ImageProxy) {
+                val frame = try {
+                    check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
+                    val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
+                    ByteArray(buffer.remaining()).also { buffer.get(it) }
+                        .let { LongExposureMerger.Frame(it, image.imageInfo.rotationDegrees) }
+                } catch (_: Exception) { null }
+                image.close()
+                runOnUiThread { acceptLongExposureFrame(frame) }
+            }
+
+            override fun onError(error: ImageCaptureException) {
+                runOnUiThread { acceptLongExposureFrame(null, error.message) }
+            }
+        })
+    }
+
+    private fun acceptLongExposureFrame(frame: LongExposureMerger.Frame?, errorMessage: String? = null) {
+        longExposureFrameCaptureInFlight = false
+        if (frame == null) {
+            stopLongExposureAfterCaptureError(errorMessage ?: "Could not read a long exposure frame.")
+            return
+        }
+        val accumulator = longExposureAccumulator ?: run {
+            stopLongExposureAfterCaptureError("Long exposure was cancelled.")
+            return
+        }
+        longExposureFrameProcessing = true
+        photoProcessingExecutor.execute {
+            val error = try {
+                accumulator.add(frame)
+                null
+            } catch (e: Exception) {
+                e.localizedMessage ?: "frame processing failed"
+            }
+            runOnUiThread {
+                longExposureFrameProcessing = false
+                if (error != null) {
+                    stopLongExposureAfterCaptureError("Long exposure failed: $error")
+                    return@runOnUiThread
+                }
+                longExposureFrameCount = accumulator.frameCount()
+                if (longExposureHoldActive) captureLongExposureFrame() else finalizeLongExposure()
+            }
+        }
+    }
+
+    private fun finishLongExposureHold(limitReached: Boolean = false) {
+        if (!longExposureHoldActive) return
+        longExposureHoldActive = false
+        longExposureHandler.removeCallbacks(longExposureTicker)
+        val elapsed = (SystemClock.elapsedRealtime() - longExposureStartedAtMs).coerceAtLeast(0L)
+        setStatusMessage("Processing long exposure · ${"%.1f".format(elapsed / 1000f)} s · $longExposureFrameCount frames")
+        if (limitReached) message("Long exposure reached the 30 second limit.")
+        if (!longExposureFrameCaptureInFlight && !longExposureFrameProcessing) finalizeLongExposure()
+    }
+
+    private fun finalizeLongExposure() {
+        if (longExposureHoldActive || longExposureFrameCaptureInFlight || longExposureFrameProcessing || longExposureFinalizing) return
+        val accumulator = longExposureAccumulator
+        val context = longExposureContext
+        if (accumulator == null || context == null || longExposureFrameCount == 0) {
+            stopLongExposureAfterCaptureError("No long exposure frames were captured.")
+            return
+        }
+        longExposureFinalizing = true
+        longExposureAccumulator = null
+        longExposureContext = null
+        val frames = longExposureFrameCount
+        longExposureFrameCount = 0
+        isBusy = false
+        refreshShutterAvailability()
+        showPolaroidFeedback()
+        setStatusMessage("Merging $frames long exposure frames…")
+        photoProcessingExecutor.execute {
+            try {
+                val merged = accumulator.finish()
+                processCapturedBitmap(
+                    merged, context.zoom, context.focusX, context.focusY, context.facing,
+                    ReferenceRenderer.Mode.LONG_EXPOSURE, context.strength, context.finish,
+                    infinityFocusAtCapture = context.infinityFocus, effectsAtCapture = context.effects
+                )
+            } catch (e: Exception) {
+                runOnUiThread {
+                    pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+                    refreshShutterAvailability()
+                    message("Long exposure merge failed: ${e.localizedMessage ?: "unknown error"}")
+                    updateStatus()
+                }
+            } finally {
+                longExposureFinalizing = false
+            }
+        }
+    }
+
+    private fun stopLongExposureAfterCaptureError(messageText: String) {
+        longExposureHoldActive = false
+        longExposureHandler.removeCallbacks(longExposureTicker)
+        if (longExposureFrameCount > 0 && longExposureAccumulator != null && longExposureContext != null) {
+            finalizeLongExposure()
+            message("$messageText Saving the frames already captured.")
+            return
+        }
+        longExposureAccumulator = null
+        longExposureContext = null
+        longExposureFrameCount = 0
+        longExposureFrameCaptureInFlight = false
+        longExposureFrameProcessing = false
+        isBusy = false
+        pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
+        refreshShutterAvailability()
+        message(messageText)
+        updateStatus()
     }
 
     private fun capture() {
         if (isBusy) return
-        if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE && longExposureSettings == null) {
-            message("This camera does not support manual long exposure.")
+        if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
+            startLongExposureHold()
+            longExposureHandler.postDelayed({ if (longExposureHoldActive) finishLongExposureHold() }, 1_000L)
             return
         }
         if (pendingPhotoCount >= maxPendingPhotos) {
@@ -1334,9 +1522,6 @@ class MainActivity : ComponentActivity() {
         if (activeMode == ReferenceRenderer.Mode.NIGHT) {
             setNightCaptureActive(true)
             if (!nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) setNightCaptureProgress(1, 2)
-        } else if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
-            val seconds = (longExposureSettings?.exposureTimeNanos ?: 0L) / 1_000_000_000f
-            setStatusMessage("Long exposure · ${"%.1f".format(seconds)} s · hold steady")
         } else setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
@@ -1843,7 +2028,13 @@ class MainActivity : ComponentActivity() {
     }
     private fun message(text: String) = setStatusMessage(text, 2_800L)
 
+    override fun onPause() {
+        if (longExposureHoldActive) finishLongExposureHold()
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        longExposureHandler.removeCallbacks(longExposureTicker)
         super.onDestroy()
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         liveCameraEffect?.close()
