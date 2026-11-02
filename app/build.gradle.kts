@@ -39,8 +39,25 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.5.11"
+        versionCode = 26
+        versionName = "0.5.12"
+    }
+
+    // Shared debug signing keeps GitHub Actions APKs installable as updates.
+    // This key is for debug builds only and must never be used for releases.
+    signingConfigs {
+        create("sharedDebug") {
+            storeFile = file("ultratone-ci-debug.keystore")
+            storePassword = "android"
+            keyAlias = "ultratone-debug"
+            keyPassword = "android"
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
+        }
     }
 
     // Build the arm64 APK first. Other Android ABIs can be added after validating
