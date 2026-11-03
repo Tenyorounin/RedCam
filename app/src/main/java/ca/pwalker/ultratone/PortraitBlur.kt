@@ -182,8 +182,11 @@ object PortraitBlur {
                 confidence.get(confidenceRow, 0, maskWidth)
             }
             for (x in 0 until source.width) {
-                val mx = min(depth.width - 1, x * depth.width / source.width)
-                val relative = ((depth.values[my * depth.width + mx] - low) / span).coerceIn(0f, 1f)
+                val relative = ((sampleDepth(
+                    depth,
+                    x.toFloat() / max(1, source.width - 1),
+                    y.toFloat() / max(1, source.height - 1)
+                ) - low) / span).coerceIn(0f, 1f)
                 val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
                 val separation = (focused - relative).coerceAtLeast(0f)
                 // A soft focus band avoids making the selected plane look artificially cut out.
@@ -229,16 +232,16 @@ object PortraitBlur {
         val maxRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 5f; 1 -> 10f; else -> 16f }
         val blurAmounts = FloatArray(input.size)
         val backgroundEligible = BooleanArray(input.size)
-        val offsets = ArrayList<Pair<Float, Float>>(29)
-        for (iy in -3..3) for (ix in -3..3) {
-            val ox = ix / 3f
-            val oy = iy / 3f
+        val offsets = ArrayList<Pair<Float, Float>>(49)
+        for (iy in -4..4) for (ix in -4..4) {
+            val ox = ix / 4f
+            val oy = iy / 4f
             if (ox * ox + oy * oy <= 1.001f) offsets += ox to oy
         }
         fun depthAt(x: Int, y: Int): Float {
-            val sx = min(depth.width - 1, x * source.width / width)
-            val sy = min(depth.height - 1, y * source.height / height)
-            return ((depth.values[sy * depth.width + sx] - low) / span).coerceIn(0f, 1f)
+            val nx = x.toFloat() / max(1, width - 1)
+            val ny = y.toFloat() / max(1, height - 1)
+            return ((sampleDepth(depth, nx, ny) - low) / span).coerceIn(0f, 1f)
         }
         fun personWeightAt(x: Int, y: Int): Float {
             if (personMask == null || maskWidth <= 0 || maskHeight <= 0) return 0f
@@ -255,9 +258,9 @@ object PortraitBlur {
             backgroundEligible[center] = amount > 0.04f && person < 0.18f
         }
 
-        // Dr.Bokeh's layered representation needs RGB behind foreground edges. A
-        // bounded two-layer nearest-background fill supplies that hidden color without
-        // adding a large neural inpainting model to the phone app.
+        // Dr.Bokeh's layered representation needs RGB behind foreground edges. Fill
+        // those pixels from the exact nearest farther-background pixel, bounded by the
+        // largest circle of confusion, before blurring the background layer.
         val nearestBackground = propagateNearestBackground(backgroundEligible, width, height, ceilRadius(maxRadius))
         val backgroundLayer = IntArray(input.size)
         for (i in input.indices) {
@@ -279,7 +282,9 @@ object PortraitBlur {
                 val sx = (x + ox * radius).roundToInt().coerceIn(0, width - 1)
                 val sy = (y + oy * radius).roundToInt().coerceIn(0, height - 1)
                 val c = backgroundLayer[sy * width + sx]
-                red += Color.red(c); green += Color.green(c); blue += Color.blue(c); total += 1f
+                val distance = kotlin.math.sqrt(ox * ox + oy * oy)
+                val weight = 1f - smoothstep(((distance - 0.78f) / (1f - 0.78f)).coerceIn(0f, 1f))
+                red += Color.red(c) * weight; green += Color.green(c) * weight; blue += Color.blue(c) * weight; total += weight
             }
             val blurred = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else backgroundLayer[center]
             output[center] = blurred
@@ -292,63 +297,91 @@ object PortraitBlur {
 
     private fun ceilRadius(radius: Float): Int = kotlin.math.ceil(radius.toDouble()).toInt() + 1
 
-    /** Two forward/backward nearest-source sweeps, limited to the largest CoC radius. */
+    /** Exact Euclidean nearest-background fill, limited to the largest CoC radius. */
     private fun propagateNearestBackground(eligible: BooleanArray, width: Int, height: Int, maxRadius: Int): IntArray {
-        val nearest = IntArray(eligible.size) { index -> if (eligible[index]) index else -1 }
-        val maxDistanceSquared = maxRadius * maxRadius
-        val forwardDx = intArrayOf(-1, -1, 0, 1)
-        val forwardDy = intArrayOf(0, -1, -1, -1)
-        val backwardDx = intArrayOf(1, 1, 0, -1)
-        val backwardDy = intArrayOf(0, 1, 1, 1)
-        repeat(2) {
-            for (y in 0 until height) for (x in 0 until width) {
-                val index = y * width + x
-                if (!eligible[index]) nearest[index] = closestBackground(
-                    nearest, width, height, x, y, nearest[index], forwardDx, forwardDy, maxDistanceSquared
-                )
+        val infinity = Int.MAX_VALUE / 4
+        val horizontalDistance = IntArray(eligible.size) { infinity }
+        val horizontalSeedX = IntArray(eligible.size) { -1 }
+        val input = IntArray(max(width, height))
+        val distances = IntArray(max(width, height))
+        val argmin = IntArray(max(width, height))
+        for (y in 0 until height) {
+            val row = y * width
+            for (x in 0 until width) input[x] = if (eligible[row + x]) 0 else infinity
+            squaredDistanceTransform(input, width, distances, argmin, infinity)
+            for (x in 0 until width) {
+                horizontalDistance[row + x] = distances[x]
+                horizontalSeedX[row + x] = argmin[x]
             }
-            for (y in height - 1 downTo 0) for (x in width - 1 downTo 0) {
+        }
+
+        val nearest = IntArray(eligible.size) { -1 }
+        val columnInput = IntArray(height)
+        val columnDistances = IntArray(height)
+        val columnArgmin = IntArray(height)
+        val maxDistanceSquared = maxRadius * maxRadius
+        for (x in 0 until width) {
+            for (y in 0 until height) columnInput[y] = horizontalDistance[y * width + x]
+            squaredDistanceTransform(columnInput, height, columnDistances, columnArgmin, infinity)
+            for (y in 0 until height) {
                 val index = y * width + x
-                if (!eligible[index]) nearest[index] = closestBackground(
-                    nearest, width, height, x, y, nearest[index], backwardDx, backwardDy, maxDistanceSquared
-                )
+                if (columnDistances[y] > maxDistanceSquared) continue
+                val seedY = columnArgmin[y]
+                if (seedY < 0) continue
+                val seedX = horizontalSeedX[seedY * width + x]
+                if (seedX >= 0) nearest[index] = seedY * width + seedX
             }
         }
         return nearest
     }
 
-    private fun closestBackground(
-        nearest: IntArray,
-        width: Int,
-        height: Int,
-        x: Int,
-        y: Int,
-        current: Int,
-        offsetsX: IntArray,
-        offsetsY: IntArray,
-        maxDistanceSquared: Int
-    ): Int {
-        var best = current
-        var bestDistance = if (best >= 0) distanceSquared(best, width, x, y) else Int.MAX_VALUE
-        for (i in offsetsX.indices) {
-            val nx = x + offsetsX[i]
-            val ny = y + offsetsY[i]
-            if (nx !in 0 until width || ny !in 0 until height) continue
-            val candidate = nearest[ny * width + nx]
-            if (candidate < 0) continue
-            val distance = distanceSquared(candidate, width, x, y)
-            if (distance < bestDistance && distance <= maxDistanceSquared) {
-                best = candidate
-                bestDistance = distance
-            }
+    /** 1D squared Euclidean distance transform, retaining the source index. */
+    private fun squaredDistanceTransform(input: IntArray, length: Int, distances: IntArray, argmin: IntArray, infinity: Int) {
+        val vertices = IntArray(length)
+        val boundaries = DoubleArray(length + 1)
+        var first = -1
+        for (i in 0 until length) if (input[i] < infinity) { first = i; break }
+        if (first < 0) {
+            for (i in 0 until length) { distances[i] = infinity; argmin[i] = -1 }
+            return
         }
-        return best
+        var k = 0
+        vertices[0] = first
+        boundaries[0] = Double.NEGATIVE_INFINITY
+        boundaries[1] = Double.POSITIVE_INFINITY
+        for (q in first + 1 until length) {
+            if (input[q] >= infinity) continue
+            var intersection = ((input[q].toDouble() + q.toDouble() * q - input[vertices[k]].toDouble() - vertices[k].toDouble() * vertices[k]) /
+                (2.0 * (q - vertices[k])))
+            while (intersection <= boundaries[k]) {
+                k--
+                intersection = ((input[q].toDouble() + q.toDouble() * q - input[vertices[k]].toDouble() - vertices[k].toDouble() * vertices[k]) /
+                    (2.0 * (q - vertices[k])))
+            }
+            k++
+            vertices[k] = q
+            boundaries[k] = intersection
+            boundaries[k + 1] = Double.POSITIVE_INFINITY
+        }
+        k = 0
+        for (q in 0 until length) {
+            while (boundaries[k + 1] < q) k++
+            val source = vertices[k]
+            val delta = q - source
+            distances[q] = input[source] + delta * delta
+            argmin[q] = source
+        }
     }
 
-    private fun distanceSquared(index: Int, width: Int, x: Int, y: Int): Int {
-        val dx = index % width - x
-        val dy = index / width - y
-        return dx * dx + dy * dy
+    private fun sampleDepth(depth: RelativeDepthEstimator.DepthMap, x: Float, y: Float): Float {
+        val fx = x.coerceIn(0f, 1f) * (depth.width - 1)
+        val fy = y.coerceIn(0f, 1f) * (depth.height - 1)
+        val x0 = fx.toInt(); val y0 = fy.toInt()
+        val x1 = min(depth.width - 1, x0 + 1); val y1 = min(depth.height - 1, y0 + 1)
+        val tx = fx - x0; val ty = fy - y0
+        val top = depth.values[y0 * depth.width + x0] * (1f - tx) + depth.values[y0 * depth.width + x1] * tx
+        val bottom = depth.values[y1 * depth.width + x0] * (1f - tx) + depth.values[y1 * depth.width + x1] * tx
+        return top * (1f - ty) + bottom * ty
     }
 
     private fun defocusAmount(relative: Float, focus: Float): Float {

@@ -101,15 +101,18 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         val guide = depthBitmap
         val guideWidth = guide?.width?.coerceAtLeast(1)?.toFloat() ?: 1f
         val guideHeight = guide?.height?.coerceAtLeast(1)?.toFloat() ?: 1f
-        val fitScale = minOf(viewWidth / guideWidth, viewHeight / guideHeight)
-        val renderedWidth = guideWidth * fitScale
-        val renderedHeight = guideHeight * fitScale
+        // PreviewView uses FILL_CENTER: the camera frame is center-cropped to
+        // cover the view. Fit-center mapping makes the depth guide drift from
+        // the live image and creates hard, visibly misplaced blur boundaries.
+        val fillScale = maxOf(viewWidth / guideWidth, viewHeight / guideHeight)
+        val renderedWidth = guideWidth * fillScale
+        val renderedHeight = guideHeight * fillScale
         val offsetX = (viewWidth - renderedWidth) / 2f
         val offsetY = (viewHeight - renderedHeight) / 2f
         val scaleX = guideWidth / renderedWidth.coerceAtLeast(1f)
         val scaleY = guideHeight / renderedHeight.coerceAtLeast(1f)
         val apertureRadius = when (bokehLevel) { 1 -> 7f; 2 -> 11f; else -> 3.5f }
-        shader.setFloatUniform("bokehRadius", apertureRadius * fitScale)
+        shader.setFloatUniform("bokehRadius", apertureRadius * fillScale)
         shader.setFloatUniform(
             "depthScale",
             scaleX,
@@ -232,9 +235,9 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         float radius = blur * bokehRadius;
                         float3 softened = float3(0.0);
                         float weightSum = 0.0;
-                        for (int yi = -2; yi <= 2; yi++) {
-                            for (int xi = -2; xi <= 2; xi++) {
-                                float2 unitOffset = float2(float(xi), float(yi)) * 0.5;
+                        for (int yi = -3; yi <= 3; yi++) {
+                            for (int xi = -3; xi <= 3; xi++) {
+                                float2 unitOffset = float2(float(xi), float(yi)) / 3.0;
                                 float dist = length(unitOffset);
                                 if (dist > 1.0) continue;
                                 float2 samplePos = p + unitOffset * radius;
@@ -244,7 +247,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                                 sampleBlur = sampleBlur * sampleBlur * 0.88;
                                 sampleBlur *= 1.0 - smoothstep(0.18, 0.62, sampleGuide.g);
                                 if (sampleBlur < 0.06) continue;
-                                float weight = 1.0 - smoothstep(0.82, 1.0, dist);
+                                float weight = 1.0 - smoothstep(0.78, 1.0, dist);
                                 softened += cameraImage.eval(samplePos).rgb * weight;
                                 weightSum += weight;
                             }
