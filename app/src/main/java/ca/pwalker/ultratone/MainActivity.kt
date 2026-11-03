@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
     private var flashMode = ImageCapture.FLASH_MODE_OFF
     private var nightExtensionActive = false
     private var isBusy = false
+    private var cameraRebindPending = false
     // Limit queued JPEGs while one full-resolution image is being processed.
     private var pendingPhotoCount = 0
     private val maxPendingPhotos = 5
@@ -1127,7 +1128,7 @@ class MainActivity : ComponentActivity() {
             updateModeButtons()
             updateMoreMenu()
         }
-        bindCamera()
+        requestCameraRebind()
     }
 
     private fun updateFlashButtonAvailability() {
@@ -1149,7 +1150,7 @@ class MainActivity : ComponentActivity() {
             ImageCapture.FLASH_MODE_ON -> "⚡ On"
             else -> "⚡ Off"
         }
-        if (cameraProvider != null) bindCamera()
+        if (cameraProvider != null) requestCameraRebind()
     }
 
     private fun selectMode(mode: ReferenceRenderer.Mode) {
@@ -1163,6 +1164,27 @@ class MainActivity : ComponentActivity() {
         updateModeButtons()
         updateMoreMenu()
         sourceBitmap?.let { renderImported(it) }
+        if (previewView.visibility == View.VISIBLE && cameraProvider != null) requestCameraRebind()
+    }
+
+    /**
+     * Switching modes rebuilds CameraX use cases. Defer that unbind while a still
+     * capture (including a multi-frame capture) is in flight, or CameraX can
+     * cancel its callback before the captured bytes reach the processing queue.
+     */
+    private fun requestCameraRebind() {
+        if (isBusy) {
+            cameraRebindPending = true
+        } else {
+            bindCamera()
+        }
+    }
+
+    /** Called on the UI thread after the active capture has delivered its data. */
+    private fun releaseCaptureAndApplyPendingRebind() {
+        isBusy = false
+        if (!cameraRebindPending) return
+        cameraRebindPending = false
         if (previewView.visibility == View.VISIBLE && cameraProvider != null) bindCamera()
     }
 
@@ -1459,7 +1481,7 @@ class MainActivity : ComponentActivity() {
         longExposureContext = null
         val frames = longExposureFrameCount
         longExposureFrameCount = 0
-        isBusy = false
+        releaseCaptureAndApplyPendingRebind()
         refreshShutterAvailability()
         showPolaroidFeedback()
         setStatusMessage("Merging $frames long exposure frames…")
@@ -1497,7 +1519,7 @@ class MainActivity : ComponentActivity() {
         longExposureFrameCount = 0
         longExposureFrameCaptureInFlight = false
         longExposureFrameProcessing = false
-        isBusy = false
+        releaseCaptureAndApplyPendingRebind()
         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
         refreshShutterAvailability()
         message(messageText)
@@ -1538,7 +1560,7 @@ class MainActivity : ComponentActivity() {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
                     runOnUiThread {
-                        isBusy = false
+                        releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
@@ -1547,7 +1569,7 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     runOnUiThread {
-                        isBusy = false
+                        releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         refreshShutterAvailability()
                         showQueueStatus()
@@ -1575,7 +1597,7 @@ class MainActivity : ComponentActivity() {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
                     runOnUiThread {
-                        isBusy = false
+                        releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
@@ -1584,7 +1606,7 @@ class MainActivity : ComponentActivity() {
                     }
                 } else {
                     runOnUiThread {
-                        isBusy = false
+                        releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         refreshShutterAvailability()
                         setStatusMessage("Merging detail frames…")
@@ -1630,7 +1652,7 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     image.close()
                     runOnUiThread {
-                        isBusy = false
+                        releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
@@ -1643,7 +1665,7 @@ class MainActivity : ComponentActivity() {
                 image.close()
                 runOnUiThread { showPolaroidFeedback() }
                 runOnUiThread {
-                    isBusy = false
+                    releaseCaptureAndApplyPendingRebind()
                     setNightCaptureActive(false)
                     refreshShutterAvailability()
                     if (modeAtCapture != ReferenceRenderer.Mode.NIGHT) {
@@ -1672,7 +1694,7 @@ class MainActivity : ComponentActivity() {
 
             override fun onError(error: ImageCaptureException) {
                 runOnUiThread {
-                    isBusy = false
+                    releaseCaptureAndApplyPendingRebind()
                     setNightCaptureActive(false)
                     pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                     refreshShutterAvailability()
