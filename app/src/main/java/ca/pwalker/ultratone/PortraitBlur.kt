@@ -19,7 +19,8 @@ object PortraitBlur {
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
     data class PreviewGuides(
         val depth: Bitmap,
-        val focusDepth: Float
+        val focusDepth: Float,
+        val focusOnPerson: Boolean
     )
 
     fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
@@ -85,6 +86,7 @@ object PortraitBlur {
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
         val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }
+        val focusOnPerson = focusIsOnPerson(confidence, maskWidth, maskHeight, focusX, focusY)
         val confidenceRows = Array(3) { FloatArray(maskWidth) }
         val guideScale = 256f / max(source.width, source.height)
         val guideWidth = max(1, (source.width * guideScale).toInt())
@@ -122,7 +124,26 @@ object PortraitBlur {
         }
         val depthBitmap = Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
         val focusDepth = focusDepthAt(guide, guideWidth, guideHeight, focusX, focusY)
-        return PreviewGuides(depthBitmap, focusDepth)
+        return PreviewGuides(depthBitmap, focusDepth, focusOnPerson)
+    }
+
+    private fun focusIsOnPerson(
+        confidence: java.nio.FloatBuffer?,
+        maskWidth: Int,
+        maskHeight: Int,
+        focusX: Float,
+        focusY: Float
+    ): Boolean {
+        if (confidence == null || maskWidth <= 0 || maskHeight <= 0) return false
+        val centerX = (focusX.coerceIn(0f, 1f) * (maskWidth - 1)).toInt()
+        val centerY = (focusY.coerceIn(0f, 1f) * (maskHeight - 1)).toInt()
+        var localConfidence = 0f
+        for (dy in -4..4) for (dx in -4..4) {
+            val x = (centerX + dx).coerceIn(0, maskWidth - 1)
+            val y = (centerY + dy).coerceIn(0, maskHeight - 1)
+            localConfidence = max(localConfidence, confidence.get(y * maskWidth + x))
+        }
+        return localConfidence >= 0.28f
     }
 
     private fun focusDepthAt(values: IntArray, width: Int, height: Int, focusX: Float, focusY: Float): Float {
@@ -164,8 +185,11 @@ object PortraitBlur {
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
         val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }
+        val focusOnPerson = focusIsOnPerson(confidence, maskWidth, maskHeight, focusX, focusY)
         val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
-        val background = renderApertureBlur(source, depth, low, span, focused, confidence, maskWidth, maskHeight, bokehLevel)
+        val background = renderApertureBlur(
+            source, depth, low, span, focused, confidence, maskWidth, maskHeight, bokehLevel, focusOnPerson
+        )
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         val row = IntArray(source.width)
         val bgRow = IntArray(source.width)
@@ -189,9 +213,12 @@ object PortraitBlur {
                 ) - low) / span).coerceIn(0f, 1f)
                 val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
                 val separation = (focused - relative).coerceAtLeast(0f)
-                // A soft focus band avoids making the selected plane look artificially cut out.
-                var blurAmount = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
-                blurAmount *= blurAmount * 0.88f
+                // When focus lands on a person, their matte gives a cleaner foreground
+                // boundary than monocular depth alone. Treat the non-person scene as
+                // background; otherwise use depth to preserve other near objects.
+                var blurAmount = if (focusOnPerson) 0.88f else {
+                    smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f)).let { it * it * 0.88f }
+                }
                 if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / source.width)
                     val person = smoothstep(((confidenceRow[maskX] - 0.12f) / (0.48f - 0.12f)).coerceIn(0f, 1f))
@@ -220,7 +247,8 @@ object PortraitBlur {
         personMask: java.nio.FloatBuffer?,
         maskWidth: Int,
         maskHeight: Int,
-        bokehLevel: Int
+        bokehLevel: Int,
+        focusOnPerson: Boolean
     ): Bitmap {
         val scale = minOf(1f, 768f / max(source.width, source.height).toFloat())
         val width = max(1, (source.width * scale).toInt())
@@ -253,7 +281,7 @@ object PortraitBlur {
         for (y in 0 until height) for (x in 0 until width) {
             val center = y * width + x
             val person = personWeightAt(x, y)
-            val amount = defocusAmount(depthAt(x, y), focus) * (1f - person)
+            val amount = (if (focusOnPerson) 0.88f else defocusAmount(depthAt(x, y), focus)) * (1f - person)
             blurAmounts[center] = amount
             backgroundEligible[center] = amount > 0.04f && person < 0.18f
         }

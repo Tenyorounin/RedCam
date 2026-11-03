@@ -28,6 +28,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("mode", 0)
         shader.setIntUniform("monochrome", 0)
         shader.setIntUniform("depthEnabled", 0)
+        shader.setIntUniform("personFocus", 0)
         shader.setIntUniform("glowEnabled", 0)
         shader.setIntUniform("vignetteEnabled", 0)
         shader.setFloatUniform("viewSize", 1f, 1f)
@@ -71,12 +72,13 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     }
 
     /** Takes ownership of the depth and foreground guides used by the lens blur. */
-    fun updateDepthGuide(bitmap: Bitmap, focusDepth: Float) {
+    fun updateDepthGuide(bitmap: Bitmap, focusDepth: Float, focusOnPerson: Boolean) {
         val oldDepth = depthBitmap
         depthBitmap = bitmap
         shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         hasFreshDepthGuide = true
         shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide && !infinityFocus) 1 else 0)
+        shader.setIntUniform("personFocus", if (focusOnPerson) 1 else 0)
         updateSize()
         if (oldDepth != null && oldDepth !== bitmap) {
             mainHandler.postDelayed({ if (oldDepth !== depthBitmap && !oldDepth.isRecycled) oldDepth.recycle() }, 2_000L)
@@ -90,6 +92,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     fun clearDepthGuide() {
         hasFreshDepthGuide = false
         shader.setIntUniform("depthEnabled", 0)
+        shader.setIntUniform("personFocus", 0)
         view.invalidate()
         view.postInvalidateOnAnimation()
     }
@@ -146,6 +149,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform int monochrome;
             uniform int nightEnhancement;
             uniform int depthEnabled;
+            uniform int personFocus;
             uniform int glowEnabled;
             uniform int vignetteEnabled;
             uniform float2 viewSize;
@@ -222,10 +226,11 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     float4 guide = depthGuide.eval(dp);
                     // Depth values are inverse depth (higher is closer), so only
                     // blur the farther background side of the selected subject.
+                    float person = smoothstep(0.18, 0.62, guide.g);
                     float separation = max(focusDepth - guide.r, 0.0);
-                    float blur = smoothstep(0.12, 0.50, separation);
-                    blur = blur * blur * 0.88;
-                    blur *= 1.0 - smoothstep(0.18, 0.62, guide.g);
+                    float blur = personFocus == 1 ? 0.88 : smoothstep(0.12, 0.50, separation);
+                    if (personFocus == 0) blur = blur * blur * 0.88;
+                    blur *= 1.0 - person;
                     if (blur > 0.002) {
                         // Gather RGB from inside a soft-edged circular aperture. Each
                         // tap is checked against its own depth so near/focused detail
@@ -242,10 +247,11 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                                 if (dist > 1.0) continue;
                                 float2 samplePos = p + unitOffset * radius;
                                 float4 sampleGuide = depthGuide.eval(samplePos * depthScale + depthOffset);
+                                float samplePerson = smoothstep(0.18, 0.62, sampleGuide.g);
                                 float sampleSeparation = max(focusDepth - sampleGuide.r, 0.0);
-                                float sampleBlur = smoothstep(0.12, 0.50, sampleSeparation);
-                                sampleBlur = sampleBlur * sampleBlur * 0.88;
-                                sampleBlur *= 1.0 - smoothstep(0.18, 0.62, sampleGuide.g);
+                                float sampleBlur = personFocus == 1 ? 0.88 : smoothstep(0.12, 0.50, sampleSeparation);
+                                if (personFocus == 0) sampleBlur = sampleBlur * sampleBlur * 0.88;
+                                sampleBlur *= 1.0 - samplePerson;
                                 if (sampleBlur < 0.06) continue;
                                 float weight = 1.0 - smoothstep(0.78, 1.0, dist);
                                 softened += cameraImage.eval(samplePos).rgb * weight;
