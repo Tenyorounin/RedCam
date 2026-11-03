@@ -17,14 +17,12 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private val shader = RuntimeShader(SOURCE)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var depthBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
-    private var bokehBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
     @Volatile private var mode = ReferenceRenderer.Mode.DAY
     private var hasFreshDepthGuide = false
     private var infinityFocus = false
     private var bokehLevel = 0
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        shader.setInputShader("bokehGuide", BitmapShader(bokehBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setFloatUniform("strength", 0.78f)
         shader.setFloatUniform("zoomRatio", 1f)
         shader.setIntUniform("mode", 0)
@@ -72,8 +70,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.postInvalidateOnAnimation()
     }
 
-    /** Takes ownership of both guide bitmaps and keeps the previous GPU inputs alive briefly. */
-    fun updateDepthGuide(bitmap: Bitmap, bokeh: Bitmap, focusDepth: Float) {
+    /** Takes ownership of the depth and foreground guides used by the lens blur. */
+    fun updateDepthGuide(bitmap: Bitmap, focusDepth: Float) {
         val oldDepth = depthBitmap
         depthBitmap = bitmap
         shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
@@ -83,21 +81,15 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         if (oldDepth != null && oldDepth !== bitmap) {
             mainHandler.postDelayed({ if (oldDepth !== depthBitmap && !oldDepth.isRecycled) oldDepth.recycle() }, 2_000L)
         }
-        updateBokehGuide(bokeh, focusDepth)
+        shader.setFloatUniform("focusDepth", focusDepth.coerceIn(0f, 1f))
+        view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
+        view.invalidate()
+        view.postInvalidateOnAnimation()
     }
 
-    /** Replace only the highlight discs so their positions follow current preview frames. */
-    fun updateBokehGuide(bokeh: Bitmap, focusDepth: Float) {
-        val oldBokeh = bokehBitmap
-        bokehBitmap = bokeh
-        shader.setFloatUniform("focusDepth", focusDepth.coerceIn(0f, 1f))
-        shader.setInputShader("bokehGuide", BitmapShader(bokeh, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        if (oldBokeh != null && oldBokeh !== bokeh) {
-            mainHandler.postDelayed({ if (oldBokeh !== bokehBitmap && !oldBokeh.isRecycled) oldBokeh.recycle() }, 2_000L)
-        }
-        // RuntimeShader inputs can remain cached on PreviewView's hardware layer;
-        // reattach and invalidate so a new frame's circles appear immediately.
-        view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
+    fun clearDepthGuide() {
+        hasFreshDepthGuide = false
+        shader.setIntUniform("depthEnabled", 0)
         view.invalidate()
         view.postInvalidateOnAnimation()
     }
@@ -116,8 +108,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         val offsetY = (viewHeight - renderedHeight) / 2f
         val scaleX = guideWidth / renderedWidth.coerceAtLeast(1f)
         val scaleY = guideHeight / renderedHeight.coerceAtLeast(1f)
-        val baseCircleRadius = when (bokehLevel) { 1 -> 4f; 2 -> 5.8f; else -> 2.5f }
-        shader.setFloatUniform("bokehRadius", baseCircleRadius * 1.35f * fitScale)
+        val apertureRadius = when (bokehLevel) { 1 -> 7f; 2 -> 11f; else -> 3.5f }
+        shader.setFloatUniform("bokehRadius", apertureRadius * fitScale)
         shader.setFloatUniform(
             "depthScale",
             scaleX,
@@ -133,9 +125,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     fun close() {
         view.setRenderEffect(null)
         depthBitmap?.let { if (!it.isRecycled) it.recycle() }
-        bokehBitmap?.let { if (!it.isRecycled) it.recycle() }
         depthBitmap = null
-        bokehBitmap = null
     }
 
     companion object {
@@ -147,7 +137,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         private val SOURCE = """
             uniform shader cameraImage;
             uniform shader depthGuide;
-            uniform shader bokehGuide;
             uniform float strength;
             uniform float zoomRatio;
             uniform int mode;
@@ -235,27 +224,35 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     blur = blur * blur * 0.88;
                     blur *= 1.0 - smoothstep(0.18, 0.62, guide.g);
                     if (blur > 0.002) {
-                        // Softly overlap circular apertures across the whole defocused
-                        // region. This is the same depth-dependent radius used by the
-                        // visible highlight discs, rather than a directional blur kernel.
+                        // Gather RGB from inside a soft-edged circular aperture. Each
+                        // tap is checked against its own depth so near/focused detail
+                        // cannot bleed into the defocused background. Bright source
+                        // colors therefore become colored CoC discs through the same
+                        // blur kernel; no synthetic white circles are painted on top.
                         float radius = blur * bokehRadius;
                         float3 softened = float3(0.0);
                         float weightSum = 0.0;
                         for (int yi = -2; yi <= 2; yi++) {
                             for (int xi = -2; xi <= 2; xi++) {
-                                float2 unitOffset = float2(float(xi), float(yi)) * 0.4;
+                                float2 unitOffset = float2(float(xi), float(yi)) * 0.5;
                                 float dist = length(unitOffset);
                                 if (dist > 1.0) continue;
-                                float weight = 1.0 - smoothstep(0.72, 1.0, dist);
-                                softened += cameraImage.eval(p + unitOffset * radius).rgb * weight;
+                                float2 samplePos = p + unitOffset * radius;
+                                float4 sampleGuide = depthGuide.eval(samplePos * depthScale + depthOffset);
+                                float sampleSeparation = max(focusDepth - sampleGuide.r, 0.0);
+                                float sampleBlur = smoothstep(0.12, 0.50, sampleSeparation);
+                                sampleBlur = sampleBlur * sampleBlur * 0.88;
+                                sampleBlur *= 1.0 - smoothstep(0.18, 0.62, sampleGuide.g);
+                                if (sampleBlur < 0.06) continue;
+                                float weight = 1.0 - smoothstep(0.82, 1.0, dist);
+                                softened += cameraImage.eval(samplePos).rgb * weight;
                                 weightSum += weight;
                             }
                         }
-                        softened /= max(weightSum, 0.0001);
-                        rgb = mix(rgb, softened, blur);
-                        float4 bokeh = bokehGuide.eval(dp);
-                        float bokehAmount = smoothstep(0.20, 0.35, blur);
-                        rgb = clamp(rgb + bokeh.rgb * bokehAmount, 0.0, 1.0);
+                        if (weightSum > 0.001) {
+                            softened /= weightSum;
+                            rgb = mix(rgb, softened, blur);
+                        }
                     }
                 }
                 float3 result = grade(rgb);

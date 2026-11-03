@@ -2,14 +2,7 @@ package ca.pwalker.ultratone
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.RadialGradient
-import android.graphics.Rect
-import android.graphics.Shader
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
@@ -17,22 +10,17 @@ import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
     data class PreviewGuides(
         val depth: Bitmap,
-        val bokeh: Bitmap,
-        val depthValues: IntArray,
-        val width: Int,
-        val height: Int,
         val focusDepth: Float
     )
-    data class PreviewBokehGuide(val bitmap: Bitmap, val focusDepth: Float)
 
     fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
         val segmenter = Segmentation.getClient(
@@ -41,37 +29,21 @@ object PortraitBlur {
         return try { apply(context, source, segmenter, focusX, focusY, bokehLevel) } finally { segmenter.close() }
     }
 
-    /** Runs at a reduced frame rate on live preview frames; depth inference is intentionally best-effort. */
+    /** Runs depth and segmentation inference at a reduced rate for the live preview. */
     class StreamProcessor(context: Context) : AutoCloseable {
         private val appContext = context.applicationContext
         private val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
         )
-        private var latestDepthValues: IntArray? = null
-        private var latestGuideWidth = 0
-        private var latestGuideHeight = 0
-
         fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result =
             PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
 
         /** Builds compact depth and photographic bokeh guides for the GPU live preview. */
-        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): PreviewGuides? {
-            val guides = PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY, bokehLevel)
-            if (guides != null) {
-                latestDepthValues = guides.depthValues
-                latestGuideWidth = guides.width
-                latestGuideHeight = guides.height
-            }
-            return guides
+        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float): PreviewGuides? {
+            return PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY)
         }
 
-        fun createBokehGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): PreviewBokehGuide =
-            PortraitBlur.createBokehGuide(source, latestDepthValues, latestGuideWidth, latestGuideHeight, focusX, focusY, bokehLevel)
-
         override fun close() {
-            latestDepthValues = null
-            latestGuideWidth = 0
-            latestGuideHeight = 0
             segmenter.close()
         }
     }
@@ -89,7 +61,6 @@ object PortraitBlur {
         } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
         return if (depth != null) applyDepth(source, mask, depth, focusX, focusY, bokehLevel)
-        else if (mask != null) applyMaskFallback(source, mask, bokehLevel)
         else Result(source, false, false)
     }
 
@@ -98,17 +69,18 @@ object PortraitBlur {
         source: Bitmap,
         segmenter: Segmenter,
         focusX: Float,
-        focusY: Float,
-        bokehLevel: Int
+        focusY: Float
     ): PreviewGuides? {
         val mask = try {
             Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 10, TimeUnit.SECONDS)
         } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
-        if (depth == null && mask == null) return null
-        val ordered = depth?.values?.sortedArray()?.takeIf { it.isNotEmpty() }
-        val low = if (ordered != null) ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)] else 0f
-        val high = if (ordered != null) ordered[(ordered.size * 0.94f).toInt().coerceIn(0, ordered.lastIndex)] else 1f
+        // A person mask alone cannot tell whether the background is actually farther
+        // away. Do not invent shallow depth of field when depth inference is unavailable.
+        if (depth == null) return null
+        val ordered = depth.values.sortedArray()
+        val low = ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)]
+        val high = ordered[(ordered.size * 0.94f).toInt().coerceIn(0, ordered.lastIndex)]
         val span = (high - low).coerceAtLeast(0.035f)
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
@@ -156,47 +128,7 @@ object PortraitBlur {
         }
         val depthBitmap = Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
         val focusDepth = focusDepthAt(guide, guideWidth, guideHeight, focusX, focusY)
-        val bokeh = renderBokehGuide(source, guide, guideWidth, guideHeight, focusDepth, bokehLevel)
-        return PreviewGuides(depthBitmap, bokeh, guide, guideWidth, guideHeight, focusDepth)
-    }
-
-    private fun createBokehGuide(
-        source: Bitmap,
-        depthValues: IntArray?,
-        guideWidth: Int,
-        guideHeight: Int,
-        focusX: Float,
-        focusY: Float,
-        bokehLevel: Int
-    ): PreviewBokehGuide {
-        val scale = 256f / max(source.width, source.height)
-        val width = max(1, (source.width * scale).toInt())
-        val height = max(1, (source.height * scale).toInt())
-        val small = Bitmap.createScaledBitmap(source, width, height, true)
-        if (depthValues == null || guideWidth <= 0 || guideHeight <= 0) {
-            val empty = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
-                it.eraseColor(Color.TRANSPARENT)
-                if (small !== source) small.recycle()
-            }
-            return PreviewBokehGuide(empty, 0.5f)
-        }
-        val focusDepth = focusDepthAt(depthValues, guideWidth, guideHeight, focusX, focusY)
-        val bokeh = renderBokehGuide(small, depthValues, guideWidth, guideHeight, focusDepth, bokehLevel)
-        if (small !== source) small.recycle()
-        return PreviewBokehGuide(bokeh, focusDepth)
-    }
-
-    private fun renderBokehGuide(
-        source: Bitmap,
-        depthValues: IntArray,
-        guideWidth: Int,
-        guideHeight: Int,
-        focusDepth: Float,
-        bokehLevel: Int
-    ): Bitmap = createBokehCircles(source, bokehLevel) { x, y ->
-        val gx = min(guideWidth - 1, x * guideWidth / source.width)
-        val gy = min(guideHeight - 1, y * guideHeight / source.height)
-        liveGuideBlurAmount(depthValues[gy * guideWidth + gx], focusDepth)
+        return PreviewGuides(depthBitmap, focusDepth)
     }
 
     private fun focusDepthAt(values: IntArray, width: Int, height: Int, focusX: Float, focusY: Float): Float {
@@ -211,15 +143,6 @@ object PortraitBlur {
         }
         samples.sort()
         return samples[samples.size / 2]
-    }
-
-    private fun liveGuideBlurAmount(sample: Int, focusDepth: Float): Float {
-        // Depth Anything V2 returns relative inverse depth: higher values are closer.
-        // Keep the near side of the selected focus plane sharp and blur only farther pixels.
-        val separation = (focusDepth - Color.red(sample) / 255f).coerceAtLeast(0f)
-        var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
-        blur = blur * blur * 0.88f
-        return blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f)))
     }
 
     private fun applyDepth(
@@ -247,24 +170,8 @@ object PortraitBlur {
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
         val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }
-        val background = blurredBackground(source, bokehLevel)
-        val bokeh = createBokehCircles(source, bokehLevel) { x, y ->
-            val mx = min(depth.width - 1, x * depth.width / source.width)
-            val my = min(depth.height - 1, y * depth.height / source.height)
-            val relative = ((depth.values[my * depth.width + mx] - low) / span).coerceIn(0f, 1f)
-            val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
-            val separation = (focused - relative).coerceAtLeast(0f)
-            var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
-            blur = blur * blur * 0.88f
-            if (confidence != null && mask != null) {
-                val maskX = min(maskWidth - 1, x * maskWidth / source.width)
-                val maskY = min(maskHeight - 1, y * maskHeight / source.height)
-                val person = confidence.get(maskY * maskWidth + maskX).coerceIn(0f, 1f)
-                blur *= 1f - smoothstep(((person - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f))
-            }
-            blur
-        }
-        compositeBokeh(background, bokeh)
+        val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
+        val background = renderApertureBlur(source, depth, low, span, focused, confidence, maskWidth, maskHeight, bokehLevel)
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         val row = IntArray(source.width)
         val bgRow = IntArray(source.width)
@@ -290,7 +197,7 @@ object PortraitBlur {
                 blurAmount *= blurAmount * 0.88f
                 if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / source.width)
-                    val person = smoothstep(((confidenceRow[maskX] - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f))
+                    val person = smoothstep(((confidenceRow[maskX] - 0.12f) / (0.48f - 0.12f)).coerceIn(0f, 1f))
                     if (person > 0.65f) subjectPixels++
                     blurAmount *= 1f - person
                 }
@@ -303,206 +210,76 @@ object PortraitBlur {
         return Result(output, peopleFound, true)
     }
 
-    /** People-only safety fallback for the rare case where depth model initialization fails. */
-    private fun applyMaskFallback(
+    /** Circular-aperture gathering on a reduced working image. Highlight RGB values are
+     * preserved by the kernel, so lamps and reflections form naturally colored circles. */
+    private fun renderApertureBlur(
         source: Bitmap,
-        mask: com.google.mlkit.vision.segmentation.SegmentationMask,
+        depth: RelativeDepthEstimator.DepthMap,
+        low: Float,
+        span: Float,
+        focus: Float,
+        personMask: java.nio.FloatBuffer?,
+        maskWidth: Int,
+        maskHeight: Int,
         bokehLevel: Int
-    ): Result {
-        val maskWidth = mask.width
-        val maskHeight = mask.height
-        val values = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer().apply { position(0) }
-        val background = blurredBackground(source, bokehLevel)
-        val bokeh = createBokehCircles(source, bokehLevel) { x, y ->
-            val mx = min(maskWidth - 1, x * maskWidth / source.width)
-            val my = min(maskHeight - 1, y * maskHeight / source.height)
-            val person = values.get(my * maskWidth + mx).coerceIn(0f, 1f)
-            1f - smoothstep(((person - 0.22f) / (0.58f - 0.22f)).coerceIn(0f, 1f))
-        }
-        compositeBokeh(background, bokeh)
-        val output = source.copy(Bitmap.Config.ARGB_8888, true)
-        val row = IntArray(source.width)
-        val bgRow = IntArray(source.width)
-        val confidenceRow = FloatArray(maskWidth)
-        var count = 0
-        for (y in 0 until source.height) {
-            source.getPixels(row, 0, source.width, 0, y, source.width, 1)
-            background.getPixels(bgRow, 0, source.width, 0, y, source.width, 1)
-            val my = min(maskHeight - 1, y * maskHeight / source.height)
-            values.position(my * maskWidth)
-            values.get(confidenceRow, 0, maskWidth)
-            for (x in 0 until source.width) {
-                val mx = min(maskWidth - 1, x * maskWidth / source.width)
-                val foreground = smoothstep(((confidenceRow[mx] - 0.22f) / 0.58f).coerceIn(0f, 1f))
-                if (foreground > 0.55f) count++
-                row[x] = mix(bgRow[x], row[x], foreground)
-            }
-            output.setPixels(row, 0, source.width, 0, y, source.width, 1)
-        }
-        background.recycle()
-        val detected = count > source.width * source.height / 100
-        return if (detected) Result(output, true, false) else {
-            output.recycle()
-            Result(source, false, false)
-        }
-    }
-
-    private fun blurredBackground(source: Bitmap, bokehLevel: Int): Bitmap {
-        val scale = 8
-        val blurRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 3; 1 -> 7; else -> 12 }
-        val width = max(1, source.width / scale)
-        val height = max(1, source.height / scale)
-        val small = Bitmap.createScaledBitmap(source, width, height, true)
-        var pixels = IntArray(width * height)
-        small.getPixels(pixels, 0, width, 0, 0, width, height)
-        small.recycle()
-        repeat(3) { pixels = boxBlur(pixels, width, height, blurRadius) }
-        val blurredSmall = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        blurredSmall.setPixels(pixels, 0, width, 0, 0, width, height)
-        return Bitmap.createScaledBitmap(blurredSmall, source.width, source.height, true).also { blurredSmall.recycle() }
-    }
-
-    /** Adds colored, soft-edged discs from bright local highlights inside out-of-focus areas. */
-    private fun createBokehCircles(
-        source: Bitmap,
-        bokehLevel: Int,
-        blurAt: (Int, Int) -> Float
     ): Bitmap {
-        val workingScale = minOf(1f, 512f / max(source.width, source.height).toFloat())
-        val width = max(1, (source.width * workingScale).toInt())
-        val height = max(1, (source.height * workingScale).toInt())
-        val workingSource = if (width == source.width && height == source.height) source
-            else Bitmap.createScaledBitmap(source, width, height, true)
-        val pixels = IntArray(width * height)
-        workingSource.getPixels(pixels, 0, width, 0, 0, width, height)
-        if (workingSource !== source) workingSource.recycle()
-        val brightness = FloatArray(pixels.size) { index ->
-            val color = pixels[index]
-            max(Color.red(color), max(Color.green(color), Color.blue(color))) / 255f
-        }
-        val points = ArrayList<BokehPoint>()
-        for (y in 2 until height - 2 step 2) {
-            for (x in 2 until width - 2 step 2) {
-                val index = y * width + x
-                val light = brightness[index]
-                if (light < 0.78f) continue
-                var localMaximum = true
-                loop@ for (dy in -2..2) for (dx in -2..2) {
-                    if (dx == 0 && dy == 0) continue
-                    val neighbor = (y + dy) * width + x + dx
-                    if (brightness[neighbor] > light || (brightness[neighbor] == light && neighbor < index)) {
-                        localMaximum = false
-                        break@loop
-                    }
-                }
-                if (!localMaximum) continue
-                var brightCore = 0
-                var surroundSum = 0f
-                var surroundCount = 0
-                for (dy in -3..3) for (dx in -3..3) {
-                    if (dx == 0 && dy == 0) continue
-                    val neighbor = brightness[(y + dy) * width + x + dx]
-                    if (neighbor >= light - 0.08f) brightCore++
-                    if (max(abs(dx), abs(dy)) >= 2) {
-                        surroundSum += neighbor
-                        surroundCount++
-                    }
-                }
-                // Flat white objects have many similarly bright neighbors. Bokeh is
-                // reserved for compact, high-contrast highlights that resemble light
-                // sources instead of bright surfaces.
-                val surroundMean = surroundSum / surroundCount.coerceAtLeast(1)
-                if (brightCore > 12 || light - surroundMean < 0.10f) continue
-                val sourceX = min(source.width - 1, x * source.width / width)
-                val sourceY = min(source.height - 1, y * source.height / height)
-                val blur = blurAt(sourceX, sourceY).coerceIn(0f, 1f)
-                if (blur < 0.35f) continue
-                points += BokehPoint(x.toFloat(), y.toFloat(), pixels[index], blur, light * blur)
-            }
-        }
-
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        if (points.isEmpty()) return bitmap
-        points.sortByDescending { it.score }
-        val baseRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 2.5f; 1 -> 4.0f; else -> 5.8f }
-        val accepted = ArrayList<BokehPoint>(min(points.size, 500))
-        val canvas = Canvas(bitmap)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        for (point in points) {
-            if (accepted.size >= 500) break
-            val radius = baseRadius * point.blur * 1.35f
-            // Keep every disc whole and separate. Clipped or heavily overlapping
-            // gradients read as streaks/lines in the small live guide.
-            if (point.x < radius + 1f || point.y < radius + 1f ||
-                point.x > width - radius - 1f || point.y > height - radius - 1f) continue
-            if (accepted.any {
-                    val otherRadius = baseRadius * it.blur * 1.35f
-                    dxdyWithin(it, point, max(3f, radius + otherRadius))
-                }) continue
-            accepted += point
-            val alpha = (255f * (0.18f + (point.score - 0.72f * point.blur).coerceAtLeast(0f) * 1.3f)
-                .coerceIn(0.20f, 0.68f)).toInt()
-            val color = Color.argb(alpha, Color.red(point.color), Color.green(point.color), Color.blue(point.color))
-            paint.shader = RadialGradient(
-                point.x, point.y, radius,
-                intArrayOf(color, color, Color.argb(alpha * 3 / 5, Color.red(point.color), Color.green(point.color), Color.blue(point.color)), Color.TRANSPARENT),
-                floatArrayOf(0f, 0.58f, 0.82f, 1f), Shader.TileMode.CLAMP
-            )
-            canvas.drawCircle(point.x, point.y, radius, paint)
-        }
-        paint.shader = null
-        return bitmap
-    }
-
-    private data class BokehPoint(val x: Float, val y: Float, val color: Int, val blur: Float, val score: Float)
-
-    private fun dxdyWithin(a: BokehPoint, b: BokehPoint, distance: Float): Boolean {
-        val dx = a.x - b.x
-        val dy = a.y - b.y
-        return dx * dx + dy * dy < distance * distance
-    }
-
-    private fun compositeBokeh(background: Bitmap, bokeh: Bitmap) {
-        val canvas = Canvas(background)
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
-        }
-        canvas.drawBitmap(bokeh, null, Rect(0, 0, background.width, background.height), paint)
-        paint.xfermode = null
-        bokeh.recycle()
-    }
-
-    private fun boxBlur(input: IntArray, width: Int, height: Int, radius: Int): IntArray {
-        val horizontal = IntArray(input.size)
+        val scale = minOf(1f, 768f / max(source.width, source.height).toFloat())
+        val width = max(1, (source.width * scale).toInt())
+        val height = max(1, (source.height * scale).toInt())
+        val small = Bitmap.createScaledBitmap(source, width, height, true)
+        val input = IntArray(width * height)
+        small.getPixels(input, 0, width, 0, 0, width, height)
+        if (small !== source) small.recycle()
         val output = IntArray(input.size)
-        val diameter = radius * 2 + 1
-        for (y in 0 until height) {
-            var rs = 0; var gs = 0; var bs = 0
-            for (i in -radius..radius) {
-                val c = input[y * width + i.coerceIn(0, width - 1)]
-                rs += Color.red(c); gs += Color.green(c); bs += Color.blue(c)
-            }
-            for (x in 0 until width) {
-                horizontal[y * width + x] = Color.rgb(rs / diameter, gs / diameter, bs / diameter)
-                val remove = input[y * width + (x - radius).coerceIn(0, width - 1)]
-                val add = input[y * width + (x + radius + 1).coerceIn(0, width - 1)]
-                rs += Color.red(add) - Color.red(remove); gs += Color.green(add) - Color.green(remove); bs += Color.blue(add) - Color.blue(remove)
-            }
+        val maxRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 5f; 1 -> 10f; else -> 16f }
+        val offsets = ArrayList<Pair<Float, Float>>(29)
+        for (iy in -3..3) for (ix in -3..3) {
+            val ox = ix / 3f
+            val oy = iy / 3f
+            if (ox * ox + oy * oy <= 1.001f) offsets += ox to oy
         }
-        for (x in 0 until width) {
-            var rs = 0; var gs = 0; var bs = 0
-            for (i in -radius..radius) {
-                val c = horizontal[i.coerceIn(0, height - 1) * width + x]
-                rs += Color.red(c); gs += Color.green(c); bs += Color.blue(c)
-            }
-            for (y in 0 until height) {
-                output[y * width + x] = Color.rgb(rs / diameter, gs / diameter, bs / diameter)
-                val remove = horizontal[(y - radius).coerceIn(0, height - 1) * width + x]
-                val add = horizontal[(y + radius + 1).coerceIn(0, height - 1) * width + x]
-                rs += Color.red(add) - Color.red(remove); gs += Color.green(add) - Color.green(remove); bs += Color.blue(add) - Color.blue(remove)
-            }
+        fun depthAt(x: Int, y: Int): Float {
+            val sx = min(depth.width - 1, x * source.width / width)
+            val sy = min(depth.height - 1, y * source.height / height)
+            return ((depth.values[sy * depth.width + sx] - low) / span).coerceIn(0f, 1f)
         }
-        return output
+        fun personAt(x: Int, y: Int): Float {
+            if (personMask == null || maskWidth <= 0 || maskHeight <= 0) return 0f
+            val sx = min(maskWidth - 1, x * maskWidth / width)
+            val sy = min(maskHeight - 1, y * maskHeight / height)
+            return personMask.get(sy * maskWidth + sx).coerceIn(0f, 1f)
+        }
+        for (y in 0 until height) for (x in 0 until width) {
+            val center = y * width + x
+            val relative = depthAt(x, y)
+            val amount = defocusAmount(relative, focus)
+            if (amount < 0.04f || personAt(x, y) > 0.18f) {
+                output[center] = input[center]
+                continue
+            }
+            val radius = maxRadius * amount
+            var red = 0f; var green = 0f; var blue = 0f; var total = 0f
+            for ((ox, oy) in offsets) {
+                val sx = (x + ox * radius).roundToInt().coerceIn(0, width - 1)
+                val sy = (y + oy * radius).roundToInt().coerceIn(0, height - 1)
+                if (defocusAmount(depthAt(sx, sy), focus) < 0.06f || personAt(sx, sy) > 0.18f) continue
+                val c = input[sy * width + sx]
+                red += Color.red(c); green += Color.green(c); blue += Color.blue(c); total += 1f
+            }
+            output[center] = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else input[center]
+        }
+        val blurred = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        blurred.setPixels(output, 0, width, 0, 0, width, height)
+        return if (width == source.width && height == source.height) blurred
+            else Bitmap.createScaledBitmap(blurred, source.width, source.height, true).also { blurred.recycle() }
+    }
+
+    private fun defocusAmount(relative: Float, focus: Float): Float {
+        // Inverse depth is higher for near objects. Close-up mode deliberately
+        // defocuses only the scene behind the selected, near focus plane.
+        val separation = (focus - relative).coerceAtLeast(0f)
+        val ramp = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
+        return ramp * ramp * 0.88f
     }
 
     private fun smoothstep(value: Float): Float = value * value * (3f - 2f * value)

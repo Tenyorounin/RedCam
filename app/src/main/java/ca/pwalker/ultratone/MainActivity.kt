@@ -131,6 +131,8 @@ class MainActivity : ComponentActivity() {
     private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
     private var lastPreviewFrameNanos = 0L
     private var lastLiveDepthGuideNanos = 0L
+    private var lastLiveDepthFocusX = Float.NaN
+    private var lastLiveDepthFocusY = Float.NaN
     private var previewCooldownUntilNanos = 0L
     private var livePreviewAvailable = false
     @Volatile private var focusX = 0.5f
@@ -1075,18 +1077,22 @@ class MainActivity : ComponentActivity() {
         }
         lastPreviewFrameNanos = now
         var styled: Bitmap? = null
-        var liveBokehOnlyFrame = false
+        val focusMoved = lastLiveDepthFocusX.isNaN() || lastLiveDepthFocusY.isNaN() ||
+            kotlin.math.abs(focusX - lastLiveDepthFocusX) > 0.01f ||
+            kotlin.math.abs(focusY - lastLiveDepthFocusY) > 0.01f
+        val refreshLiveDepth = effect != null && (now - lastLiveDepthGuideNanos >= 500_000_000L || focusMoved)
+        if (effect != null && !refreshLiveDepth) {
+            // The live GPU shader consumes the camera's current frame directly.
+            // Only the depth/focus guide needs periodic CPU inference.
+            proxy.close()
+            return
+        }
         try {
             val plane = proxy.planes.firstOrNull() ?: return
             val buffer: ByteBuffer = plane.buffer.duplicate()
             val width = proxy.width
             val height = proxy.height
-            val refreshLiveDepth = effect != null && now - lastLiveDepthGuideNanos >= 1_000_000_000L
-            liveBokehOnlyFrame = effect != null && !refreshLiveDepth
-            // Non-depth live updates only need the 256 px Bokeh guide. Sampling the
-            // analyzer buffer directly avoids building and scaling a full camera frame
-            // twenty times a second just to move the highlight circles.
-            val sampleScale = if (effect != null && !refreshLiveDepth) minOf(1f, 256f / maxOf(width, height)) else 1f
+            val sampleScale = if (effect != null) minOf(1f, 512f / maxOf(width, height)) else 1f
             val sampleWidth = maxOf(1, (width * sampleScale).toInt())
             val sampleHeight = maxOf(1, (height * sampleScale).toInt())
             val pixels = IntArray(sampleWidth * sampleHeight)
@@ -1120,30 +1126,28 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
-                val currentBokehLevel = bokehLevel
                 val focus = mapFocusToFrame(
                     focusX, focusY, previewView.width, previewView.height, oriented.width, oriented.height,
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
-                val guides = if (refreshLiveDepth) processor.createDepthGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
-                if (refreshLiveDepth) lastLiveDepthGuideNanos = System.nanoTime()
-                val bokeh = if (guides == null) processor.createBokehGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
+                val guides = processor.createDepthGuide(oriented, focus.first, focus.second)
+                if (refreshLiveDepth) {
+                    lastLiveDepthGuideNanos = System.nanoTime()
+                    lastLiveDepthFocusX = focusX
+                    lastLiveDepthFocusY = focusY
+                }
                 oriented.recycle()
                 if (guides != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
-                            effect.updateDepthGuide(guides.depth, guides.bokeh, guides.focusDepth)
+                            effect.updateDepthGuide(guides.depth, guides.focusDepth)
                         } else {
                             if (!guides.depth.isRecycled) guides.depth.recycle()
-                            if (!guides.bokeh.isRecycled) guides.bokeh.recycle()
                         }
                     }
-                }
-                if (bokeh != null) {
+                } else {
                     runOnUiThread {
-                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
-                            effect.updateBokehGuide(bokeh.bitmap, bokeh.focusDepth)
-                        } else if (!bokeh.bitmap.isRecycled) bokeh.bitmap.recycle()
+                        if (!isDestroyed && activeMode == ReferenceRenderer.Mode.CLOSE_UP) effect.clearDepthGuide()
                     }
                 }
                 return
@@ -1188,7 +1192,7 @@ class MainActivity : ComponentActivity() {
             // If CPU rendering is already missing its target interval, give the
             // camera and UI threads time between frames instead of running the
             // analysis executor continuously at full load.
-            if (!liveBokehOnlyFrame && processingNanos > minimumInterval * 3 / 5) {
+            if (processingNanos > minimumInterval * 3 / 5) {
                 val restNanos = (processingNanos / 2).coerceIn(100_000_000L, 450_000_000L)
                 previewCooldownUntilNanos = System.nanoTime() + restNanos
             }
