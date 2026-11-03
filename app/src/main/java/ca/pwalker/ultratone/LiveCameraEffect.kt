@@ -228,7 +228,9 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                 if (depthEnabled == 1) {
                     float2 dp = p * depthScale + depthOffset;
                     float4 guide = depthGuide.eval(dp);
-                    float separation = abs(guide.r - focusDepth);
+                    // Depth values are inverse depth (higher is closer), so only
+                    // blur the farther background side of the selected subject.
+                    float separation = max(focusDepth - guide.r, 0.0);
                     float blur = smoothstep(0.12, 0.50, separation);
                     blur = blur * blur * 0.88;
                     blur *= 1.0 - smoothstep(0.18, 0.62, guide.g);

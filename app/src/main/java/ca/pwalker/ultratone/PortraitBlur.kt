@@ -214,7 +214,9 @@ object PortraitBlur {
     }
 
     private fun liveGuideBlurAmount(sample: Int, focusDepth: Float): Float {
-        val separation = abs(Color.red(sample) / 255f - focusDepth)
+        // Depth Anything V2 returns relative inverse depth: higher values are closer.
+        // Keep the near side of the selected focus plane sharp and blur only farther pixels.
+        val separation = (focusDepth - Color.red(sample) / 255f).coerceAtLeast(0f)
         var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
         blur = blur * blur * 0.88f
         return blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f)))
@@ -251,7 +253,7 @@ object PortraitBlur {
             val my = min(depth.height - 1, y * depth.height / source.height)
             val relative = ((depth.values[my * depth.width + mx] - low) / span).coerceIn(0f, 1f)
             val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
-            val separation = abs(relative - focused)
+            val separation = (focused - relative).coerceAtLeast(0f)
             var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
             blur = blur * blur * 0.88f
             if (confidence != null && mask != null) {
@@ -282,7 +284,7 @@ object PortraitBlur {
                 val mx = min(depth.width - 1, x * depth.width / source.width)
                 val relative = ((depth.values[my * depth.width + mx] - low) / span).coerceIn(0f, 1f)
                 val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
-                val separation = abs(relative - focused)
+                val separation = (focused - relative).coerceAtLeast(0f)
                 // A soft focus band avoids making the selected plane look artificially cut out.
                 var blurAmount = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
                 blurAmount *= blurAmount * 0.88f
@@ -374,21 +376,21 @@ object PortraitBlur {
         val pixels = IntArray(width * height)
         workingSource.getPixels(pixels, 0, width, 0, 0, width, height)
         if (workingSource !== source) workingSource.recycle()
-        val luminance = FloatArray(pixels.size) { index ->
+        val brightness = FloatArray(pixels.size) { index ->
             val color = pixels[index]
-            (0.2126f * Color.red(color) + 0.7152f * Color.green(color) + 0.0722f * Color.blue(color)) / 255f
+            max(Color.red(color), max(Color.green(color), Color.blue(color))) / 255f
         }
         val points = ArrayList<BokehPoint>()
         for (y in 2 until height - 2 step 2) {
             for (x in 2 until width - 2 step 2) {
                 val index = y * width + x
-                val light = luminance[index]
+                val light = brightness[index]
                 if (light < 0.78f) continue
                 var localMaximum = true
                 loop@ for (dy in -2..2) for (dx in -2..2) {
                     if (dx == 0 && dy == 0) continue
                     val neighbor = (y + dy) * width + x + dx
-                    if (luminance[neighbor] > light || (luminance[neighbor] == light && neighbor < index)) {
+                    if (brightness[neighbor] > light || (brightness[neighbor] == light && neighbor < index)) {
                         localMaximum = false
                         break@loop
                     }
@@ -399,7 +401,7 @@ object PortraitBlur {
                 var surroundCount = 0
                 for (dy in -3..3) for (dx in -3..3) {
                     if (dx == 0 && dy == 0) continue
-                    val neighbor = luminance[(y + dy) * width + x + dx]
+                    val neighbor = brightness[(y + dy) * width + x + dx]
                     if (neighbor >= light - 0.08f) brightCore++
                     if (max(abs(dx), abs(dy)) >= 2) {
                         surroundSum += neighbor
