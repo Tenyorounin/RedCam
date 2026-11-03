@@ -88,7 +88,6 @@ object PortraitBlur {
                 confidence.get(confidenceRow, 0, maskWidth)
             }
             for (x in 0 until guideWidth) {
-                val depthX = min(depth.width - 1, x * depth.width / guideWidth)
                 val person = if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / guideWidth)
                     confidenceRow[maskX].coerceIn(0f, 1f)
