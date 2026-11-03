@@ -240,11 +240,12 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         float radius = blur * bokehRadius;
                         float3 softened = float3(0.0);
                         float weightSum = 0.0;
-                        for (int yi = -3; yi <= 3; yi++) {
-                            for (int xi = -3; xi <= 3; xi++) {
-                                float2 unitOffset = float2(float(xi), float(yi)) / 3.0;
-                                float dist = length(unitOffset);
-                                if (dist > 1.0) continue;
+                        for (int i = 0; i < 24; i++) {
+                                // Vogel disk: evenly covers a circular aperture without
+                                // the visible lattice from a clipped square grid.
+                                float dist = sqrt((float(i) + 0.5) / 24.0);
+                                float angle = float(i) * 2.39996323;
+                                float2 unitOffset = dist * float2(cos(angle), sin(angle));
                                 float2 samplePos = p + unitOffset * radius;
                                 float4 sampleGuide = depthGuide.eval(samplePos * depthScale + depthOffset);
                                 float samplePerson = smoothstep(0.18, 0.62, sampleGuide.g);
@@ -256,7 +257,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                                 float weight = 1.0 - smoothstep(0.78, 1.0, dist);
                                 softened += cameraImage.eval(samplePos).rgb * weight;
                                 weightSum += weight;
-                            }
                         }
                         if (weightSum > 0.001) {
                             softened /= weightSum;

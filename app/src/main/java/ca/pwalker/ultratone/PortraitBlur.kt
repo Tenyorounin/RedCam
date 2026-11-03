@@ -12,10 +12,18 @@ import java.nio.ByteOrder
 import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
+    private data class Highlight(val x: Int, val y: Int, val color: Int, val strength: Float, val blur: Float)
+    private val linearChannel = FloatArray(256) { value ->
+        val encoded = value / 255f
+        if (encoded <= 0.04045f) encoded / 12.92f
+        else ((encoded + 0.055f) / 1.055f).pow(2.4f)
+    }
+
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
     data class PreviewGuides(
         val depth: Bitmap,
@@ -285,6 +293,7 @@ object PortraitBlur {
             blurAmounts[center] = amount
             backgroundEligible[center] = amount > 0.04f && person < 0.18f
         }
+        val highlights = findBackgroundHighlights(input, width, height, blurAmounts, backgroundEligible)
 
         // Dr.Bokeh's layered representation needs RGB behind foreground edges. Fill
         // those pixels from the exact nearest farther-background pixel, bounded by the
@@ -317,10 +326,114 @@ object PortraitBlur {
             val blurred = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else backgroundLayer[center]
             output[center] = blurred
         }
+        renderHighlightDiscs(output, width, height, blurAmounts, backgroundEligible, highlights, maxRadius, bokehLevel)
         val blurred = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         blurred.setPixels(output, 0, width, 0, 0, width, height)
         return if (width == source.width && height == source.height) blurred
             else Bitmap.createScaledBitmap(blurred, source.width, source.height, true).also { blurred.recycle() }
+    }
+
+    private fun findBackgroundHighlights(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        blurAmounts: FloatArray,
+        backgroundEligible: BooleanArray
+    ): List<Highlight> {
+        if (width < 9 || height < 9) return emptyList()
+        fun luma(color: Int) =
+            0.2126f * linearChannel[Color.red(color)] +
+                0.7152f * linearChannel[Color.green(color)] +
+                0.0722f * linearChannel[Color.blue(color)]
+
+        val luminance = FloatArray(pixels.size) { luma(pixels[it]) }
+        val suppressed = BooleanArray(pixels.size)
+        val highlights = ArrayList<Highlight>(32)
+        val ring = intArrayOf(-4, -3, 3, 4)
+        for (y in 4 until height - 4) {
+            for (x in 4 until width - 4) {
+                val index = y * width + x
+                val peak = luminance[index]
+                if (suppressed[index] || !backgroundEligible[index] || blurAmounts[index] < 0.22f || peak < 0.62f) continue
+
+                var ringLuma = 0f
+                var ringSamples = 0
+                for (dy in ring) for (dx in ring) {
+                    ringLuma += luminance[(y + dy) * width + x + dx]
+                    ringSamples++
+                }
+                val contrast = peak - ringLuma / ringSamples
+                if (contrast < 0.14f) continue
+
+                var localPeak = true
+                for (dy in -2..2) for (dx in -2..2) {
+                    if (!localPeak || (dx == 0 && dy == 0)) continue
+                    val neighborIndex = (y + dy) * width + x + dx
+                    val neighbor = luminance[neighborIndex]
+                    if (neighbor > peak + 0.003f ||
+                        (kotlin.math.abs(neighbor - peak) <= 0.003f && neighborIndex < index)
+                    ) localPeak = false
+                }
+                if (!localPeak) continue
+
+                var red = 0f; var green = 0f; var blue = 0f; var colorWeight = 0f
+                for (dy in -2..2) for (dx in -2..2) {
+                    val colorIndex = (y + dy) * width + x + dx
+                    val weight = (luminance[colorIndex] - 0.42f).coerceAtLeast(0f)
+                    if (weight <= 0f) continue
+                    val color = pixels[colorIndex]
+                    red += Color.red(color) * weight
+                    green += Color.green(color) * weight
+                    blue += Color.blue(color) * weight
+                    colorWeight += weight
+                }
+                if (colorWeight <= 0f) continue
+                val sourceColor = Color.rgb(
+                    (red / colorWeight).roundToInt().coerceIn(0, 255),
+                    (green / colorWeight).roundToInt().coerceIn(0, 255),
+                    (blue / colorWeight).roundToInt().coerceIn(0, 255)
+                )
+                val peakStrength = ((peak - 0.56f) / 0.44f).coerceIn(0f, 1f)
+                val contrastStrength = ((contrast - 0.08f) / 0.42f).coerceIn(0f, 1f)
+                val strength = (0.25f + 0.75f * peakStrength) * (0.35f + 0.65f * contrastStrength)
+                highlights += Highlight(x, y, sourceColor, strength.coerceIn(0.18f, 1f), blurAmounts[index])
+                for (dy in -5..5) for (dx in -5..5) {
+                    if (dx * dx + dy * dy <= 25) suppressed[(y + dy) * width + x + dx] = true
+                }
+                if (highlights.size >= 96) return highlights
+            }
+        }
+        return highlights
+    }
+
+    private fun renderHighlightDiscs(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        blurAmounts: FloatArray,
+        backgroundEligible: BooleanArray,
+        highlights: List<Highlight>,
+        maxRadius: Float,
+        bokehLevel: Int
+    ) {
+        val opacity = when (bokehLevel.coerceIn(0, 2)) { 0 -> 0.34f; 1 -> 0.46f; else -> 0.58f }
+        for (highlight in highlights) {
+            val radius = max(2f, maxRadius * highlight.blur * 0.82f)
+            val reach = kotlin.math.ceil(radius.toDouble()).toInt()
+            for (dy in -reach..reach) for (dx in -reach..reach) {
+                val normalized = kotlin.math.sqrt((dx * dx + dy * dy).toFloat()) / radius
+                if (normalized >= 1f) continue
+                val x = highlight.x + dx
+                val y = highlight.y + dy
+                if (x !in 0 until width || y !in 0 until height) continue
+                val index = y * width + x
+                if (!backgroundEligible[index] || blurAmounts[index] < 0.16f) continue
+                val edge = 1f - smoothstep(((normalized - 0.70f) / 0.30f).coerceIn(0f, 1f))
+                val amountScale = (blurAmounts[index] / highlight.blur).coerceIn(0f, 1f)
+                val alpha = (highlight.strength * opacity * edge * amountScale).coerceIn(0f, 0.62f)
+                if (alpha > 0.002f) pixels[index] = mix(pixels[index], highlight.color, alpha)
+            }
+        }
     }
 
     private fun ceilRadius(radius: Float): Int = kotlin.math.ceil(radius.toDouble()).toInt() + 1
