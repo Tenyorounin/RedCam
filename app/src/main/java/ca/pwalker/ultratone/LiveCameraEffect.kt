@@ -58,7 +58,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         })
         shader.setIntUniform("glowEnabled", if (effects.glow) 1 else 0)
         shader.setIntUniform("vignetteEnabled", if (effects.vignette) 1 else 0)
-        shader.setFloatUniform("bokehScale", when (bokehLevel.coerceIn(0, 2)) { 0 -> 1f; 1 -> 1.4f; else -> 1.8f })
+        // Keep each tap visibly distinct when cycling the Close-up bokeh levels.
+        shader.setFloatUniform("bokehScale", when (bokehLevel.coerceIn(0, 2)) { 0 -> 1f; 1 -> 2f; else -> 3.2f })
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
         shader.setIntUniform("nightEnhancement", if (nightEnhancement && mode == ReferenceRenderer.Mode.NIGHT) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))

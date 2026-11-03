@@ -1803,15 +1803,7 @@ class MainActivity : ComponentActivity() {
                     processedPreviewBitmap?.let { it.width.toFloat() / it.height.coerceAtLeast(1) }
                         ?: previewContentAspectRatio()
                 } else previewContentAspectRatio()
-                val rect = fitCenterContentRect(activePreview.width, activePreview.height, aspect) ?: return
-                val previewLocation = IntArray(2)
-                val layerLocation = IntArray(2)
-                activePreview.getLocationOnScreen(previewLocation)
-                photoFeedbackLayer.getLocationOnScreen(layerLocation)
-                rect.offset(
-                    (previewLocation[0] - layerLocation[0]).toFloat(),
-                    (previewLocation[1] - layerLocation[1]).toFloat()
-                )
+                val rect = fitCenterContentRect(width, height, aspect) ?: return
                 val edge = dp(5).toFloat()
                 val bottomEdge = dp(23).toFloat()
                 canvas.drawRect(rect.left, rect.top, rect.right, rect.top + edge, paint)
@@ -1823,11 +1815,18 @@ class MainActivity : ComponentActivity() {
             setWillNotDraw(false)
             isClickable = false
             isFocusable = false
-            pivotX = photoFeedbackLayer.width / 2f
-            pivotY = photoFeedbackLayer.height / 2f + activePreview.translationY
+            translationX = activePreview.translationX
+            translationY = activePreview.translationY
+            pivotX = activePreview.width / 2f
+            pivotY = activePreview.height / 2f
         }
         photoFeedbackLayer.removeAllViews()
-        photoFeedbackLayer.addView(frame, FrameLayout.LayoutParams(-1, -1))
+        photoFeedbackLayer.addView(frame, FrameLayout.LayoutParams(
+            activePreview.width, activePreview.height
+        ).apply {
+            leftMargin = activePreview.left
+            topMargin = activePreview.top
+        })
         activePreview.animate().cancel()
         frame.animate().cancel()
         activePreview.scaleX = 1f
