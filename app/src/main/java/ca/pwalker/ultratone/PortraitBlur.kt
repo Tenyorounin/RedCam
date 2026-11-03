@@ -361,7 +361,7 @@ object PortraitBlur {
                 val sourceX = min(source.width - 1, x * source.width / width)
                 val sourceY = min(source.height - 1, y * source.height / height)
                 val blur = blurAt(sourceX, sourceY).coerceIn(0f, 1f)
-                if (blur < 0.20f) continue
+                if (blur < 0.35f) continue
                 points += BokehPoint(x.toFloat(), y.toFloat(), pixels[index], blur, light * blur)
             }
         }
@@ -375,9 +375,15 @@ object PortraitBlur {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         for (point in points) {
             if (accepted.size >= 500) break
-            val radius = baseRadius * (0.55f + point.blur * 0.8f)
-            val separation = max(3f, radius * 0.85f)
-            if (accepted.any { dxdyWithin(it, point, separation) }) continue
+            val radius = baseRadius * point.blur * 1.35f
+            // Keep every disc whole and separate. Clipped or heavily overlapping
+            // gradients read as streaks/lines in the small live guide.
+            if (point.x < radius + 1f || point.y < radius + 1f ||
+                point.x > width - radius - 1f || point.y > height - radius - 1f) continue
+            if (accepted.any {
+                    val otherRadius = baseRadius * it.blur * 1.35f
+                    dxdyWithin(it, point, max(3f, radius + otherRadius))
+                }) continue
             accepted += point
             val alpha = (255f * (0.18f + (point.score - 0.72f * point.blur).coerceAtLeast(0f) * 1.3f)
                 .coerceIn(0.20f, 0.68f)).toInt()

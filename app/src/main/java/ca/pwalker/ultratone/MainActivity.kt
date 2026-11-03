@@ -1069,7 +1069,7 @@ class MainActivity : ComponentActivity() {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 250_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 100_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -1081,21 +1081,30 @@ class MainActivity : ComponentActivity() {
             val buffer: ByteBuffer = plane.buffer.duplicate()
             val width = proxy.width
             val height = proxy.height
-            val pixels = IntArray(width * height)
+            val refreshLiveDepth = effect != null && now - lastLiveDepthGuideNanos >= 1_000_000_000L
+            // Non-depth live updates only need the 256 px Bokeh guide. Sampling the
+            // analyzer buffer directly avoids building and scaling a full camera frame
+            // ten times a second just to move the highlight circles.
+            val sampleScale = if (effect != null && !refreshLiveDepth) minOf(1f, 256f / maxOf(width, height)) else 1f
+            val sampleWidth = maxOf(1, (width * sampleScale).toInt())
+            val sampleHeight = maxOf(1, (height * sampleScale).toInt())
+            val pixels = IntArray(sampleWidth * sampleHeight)
             val pixelStride = plane.pixelStride
             val rowStride = plane.rowStride
-            for (y in 0 until height) {
-                val rowOffset = y * rowStride
-                for (x in 0 until width) {
-                    val offset = rowOffset + x * pixelStride
+            for (y in 0 until sampleHeight) {
+                val sourceY = y * height / sampleHeight
+                val rowOffset = sourceY * rowStride
+                for (x in 0 until sampleWidth) {
+                    val sourceX = x * width / sampleWidth
+                    val offset = rowOffset + sourceX * pixelStride
                     val r = buffer.get(offset).toInt() and 0xff
                     val g = buffer.get(offset + 1).toInt() and 0xff
                     val b = buffer.get(offset + 2).toInt() and 0xff
                     val a = buffer.get(offset + 3).toInt() and 0xff
-                    pixels[y * width + x] = Color.argb(a, r, g, b)
+                    pixels[y * sampleWidth + x] = Color.argb(a, r, g, b)
                 }
             }
-            val raw = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+            val raw = Bitmap.createBitmap(pixels, sampleWidth, sampleHeight, Bitmap.Config.ARGB_8888)
             val rotation = proxy.imageInfo.rotationDegrees
             val oriented = if (rotation != 0 || lensFacing == CameraSelector.LENS_FACING_FRONT) {
                 val transform = Matrix().apply {
@@ -1115,9 +1124,8 @@ class MainActivity : ComponentActivity() {
                     focusX, focusY, previewView.width, previewView.height, oriented.width, oriented.height,
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
-                val refreshDepth = now - lastLiveDepthGuideNanos >= 1_000_000_000L
-                val guides = if (refreshDepth) processor.createDepthGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
-                if (refreshDepth) lastLiveDepthGuideNanos = System.nanoTime()
+                val guides = if (refreshLiveDepth) processor.createDepthGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
+                if (refreshLiveDepth) lastLiveDepthGuideNanos = System.nanoTime()
                 val bokeh = if (guides == null) processor.createBokehGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
                 oriented.recycle()
                 if (guides != null) {
@@ -1268,7 +1276,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects(), bokehLevel)
     }
 
     private fun updateFinishButtons() {
