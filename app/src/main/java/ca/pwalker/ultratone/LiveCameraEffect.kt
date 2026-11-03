@@ -17,6 +17,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private val shader = RuntimeShader(SOURCE)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var depthBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
+    private var bokehBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
     @Volatile private var mode = ReferenceRenderer.Mode.DAY
     private var focusX = 0.5f
     private var focusY = 0.5f
@@ -24,6 +25,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private var infinityFocus = false
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        shader.setInputShader("bokehGuide", BitmapShader(bokehBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setFloatUniform("strength", 0.78f)
         shader.setFloatUniform("zoomRatio", 1f)
         shader.setIntUniform("mode", 0)
@@ -83,17 +85,22 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         )
     }
 
-    /** Takes ownership of the guide bitmap and keeps the previous GPU input alive briefly. */
-    fun updateDepthGuide(bitmap: Bitmap) {
-        val old = depthBitmap
+    /** Takes ownership of both guide bitmaps and keeps the previous GPU inputs alive briefly. */
+    fun updateDepthGuide(bitmap: Bitmap, bokeh: Bitmap) {
+        val oldDepth = depthBitmap
+        val oldBokeh = bokehBitmap
         depthBitmap = bitmap
-        val input = BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-        shader.setInputShader("depthGuide", input)
+        bokehBitmap = bokeh
+        shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        shader.setInputShader("bokehGuide", BitmapShader(bokeh, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         hasFreshDepthGuide = true
         shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide && !infinityFocus) 1 else 0)
         updateSize()
-        if (old != null && old !== bitmap) {
-            mainHandler.postDelayed({ if (old !== depthBitmap && !old.isRecycled) old.recycle() }, 2_000L)
+        if (oldDepth != null && oldDepth !== bitmap) {
+            mainHandler.postDelayed({ if (oldDepth !== depthBitmap && !oldDepth.isRecycled) oldDepth.recycle() }, 2_000L)
+        }
+        if (oldBokeh != null && oldBokeh !== bokeh) {
+            mainHandler.postDelayed({ if (oldBokeh !== bokehBitmap && !oldBokeh.isRecycled) oldBokeh.recycle() }, 2_000L)
         }
     }
 
@@ -127,7 +134,9 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     fun close() {
         view.setRenderEffect(null)
         depthBitmap?.let { if (!it.isRecycled) it.recycle() }
+        bokehBitmap?.let { if (!it.isRecycled) it.recycle() }
         depthBitmap = null
+        bokehBitmap = null
     }
 
     companion object {
@@ -139,6 +148,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         private val SOURCE = """
             uniform shader cameraImage;
             uniform shader depthGuide;
+            uniform shader bokehGuide;
             uniform float strength;
             uniform float zoomRatio;
             uniform int mode;
@@ -237,6 +247,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         cameraImage.eval(p + float2(-dd.x, dd.y)).rgb
                     ) * 0.125;
                     rgb = mix(rgb, softened, blur);
+                    float4 bokeh = bokehGuide.eval(dp);
+                    rgb = clamp(rgb + bokeh.rgb * blur, 0.0, 1.0);
                 }
                 float3 result = grade(rgb);
                 if (glowEnabled == 1) {

@@ -1106,13 +1106,20 @@ class MainActivity : ComponentActivity() {
             if (effect != null) {
                 if (infinityFocusEnabled) return
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
-                val guide = processor.createDepthGuide(oriented)
+                val focus = mapFocusToFrame(
+                    focusX, focusY, previewView.width, previewView.height, oriented.width, oriented.height,
+                    lensFacing == CameraSelector.LENS_FACING_FRONT
+                )
+                val guides = processor.createDepthGuide(oriented, focus.first, focus.second, bokehLevel)
                 oriented.recycle()
-                if (guide != null) {
+                if (guides != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
-                            effect.updateDepthGuide(guide)
-                        } else if (!guide.isRecycled) guide.recycle()
+                            effect.updateDepthGuide(guides.depth, guides.bokeh)
+                        } else {
+                            if (!guides.depth.isRecycled) guides.depth.recycle()
+                            if (!guides.bokeh.isRecycled) guides.bokeh.recycle()
+                        }
                     }
                 }
                 return
