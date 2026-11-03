@@ -246,29 +246,29 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     float blur = smoothstep(0.055, 0.42, separation);
                     blur = blur * blur * 0.88;
                     blur *= 1.0 - smoothstep(0.30, 0.78, guide.g);
-                    // Use the same circle of confusion as the rendered Bokeh discs.
-                    // Concentric samples fill the aperture instead of making an 8-ray blur.
-                    float radius = blur * bokehRadius;
-                    float inner = radius * 0.52;
-                    float diagonal = radius * 0.70;
-                    float3 softened = base.rgb;
-                    softened += cameraImage.eval(p + float2(inner, 0.0)).rgb;
-                    softened += cameraImage.eval(p + float2(-inner, 0.0)).rgb;
-                    softened += cameraImage.eval(p + float2(0.0, inner)).rgb;
-                    softened += cameraImage.eval(p + float2(0.0, -inner)).rgb;
-                    softened += cameraImage.eval(p + float2(diagonal, diagonal)).rgb;
-                    softened += cameraImage.eval(p + float2(-diagonal, diagonal)).rgb;
-                    softened += cameraImage.eval(p + float2(diagonal, -diagonal)).rgb;
-                    softened += cameraImage.eval(p + float2(-diagonal, -diagonal)).rgb;
-                    softened += cameraImage.eval(p + float2(radius, 0.0)).rgb;
-                    softened += cameraImage.eval(p + float2(-radius, 0.0)).rgb;
-                    softened += cameraImage.eval(p + float2(0.0, radius)).rgb;
-                    softened += cameraImage.eval(p + float2(0.0, -radius)).rgb;
-                    softened *= 1.0 / 13.0;
-                    rgb = mix(rgb, softened, blur);
-                    float4 bokeh = bokehGuide.eval(dp);
-                    float bokehAmount = smoothstep(0.20, 0.35, blur);
-                    rgb = clamp(rgb + bokeh.rgb * bokehAmount, 0.0, 1.0);
+                    if (blur > 0.002) {
+                        // Softly overlap circular apertures across the whole defocused
+                        // region. This is the same depth-dependent radius used by the
+                        // visible highlight discs, rather than a directional blur kernel.
+                        float radius = blur * bokehRadius;
+                        float3 softened = float3(0.0);
+                        float weightSum = 0.0;
+                        for (int yi = -2; yi <= 2; yi++) {
+                            for (int xi = -2; xi <= 2; xi++) {
+                                float2 unitOffset = float2(float(xi), float(yi)) * 0.4;
+                                float dist = length(unitOffset);
+                                if (dist > 1.0) continue;
+                                float weight = 1.0 - smoothstep(0.72, 1.0, dist);
+                                softened += cameraImage.eval(p + unitOffset * radius).rgb * weight;
+                                weightSum += weight;
+                            }
+                        }
+                        softened /= max(weightSum, 0.0001);
+                        rgb = mix(rgb, softened, blur);
+                        float4 bokeh = bokehGuide.eval(dp);
+                        float bokehAmount = smoothstep(0.20, 0.35, blur);
+                        rgb = clamp(rgb + bokeh.rgb * bokehAmount, 0.0, 1.0);
+                    }
                 }
                 float3 result = grade(rgb);
                 if (glowEnabled == 1) {

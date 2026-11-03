@@ -1069,22 +1069,24 @@ class MainActivity : ComponentActivity() {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 100_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 50_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
         }
         lastPreviewFrameNanos = now
         var styled: Bitmap? = null
+        var liveBokehOnlyFrame = false
         try {
             val plane = proxy.planes.firstOrNull() ?: return
             val buffer: ByteBuffer = plane.buffer.duplicate()
             val width = proxy.width
             val height = proxy.height
             val refreshLiveDepth = effect != null && now - lastLiveDepthGuideNanos >= 1_000_000_000L
+            liveBokehOnlyFrame = effect != null && !refreshLiveDepth
             // Non-depth live updates only need the 256 px Bokeh guide. Sampling the
             // analyzer buffer directly avoids building and scaling a full camera frame
-            // ten times a second just to move the highlight circles.
+            // twenty times a second just to move the highlight circles.
             val sampleScale = if (effect != null && !refreshLiveDepth) minOf(1f, 256f / maxOf(width, height)) else 1f
             val sampleWidth = maxOf(1, (width * sampleScale).toInt())
             val sampleHeight = maxOf(1, (height * sampleScale).toInt())
@@ -1187,7 +1189,7 @@ class MainActivity : ComponentActivity() {
             // If CPU rendering is already missing its target interval, give the
             // camera and UI threads time between frames instead of running the
             // analysis executor continuously at full load.
-            if (processingNanos > minimumInterval * 3 / 5) {
+            if (!liveBokehOnlyFrame && processingNanos > minimumInterval * 3 / 5) {
                 val restNanos = (processingNanos / 2).coerceIn(100_000_000L, 450_000_000L)
                 previewCooldownUntilNanos = System.nanoTime() + restNanos
             }
