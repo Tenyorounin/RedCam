@@ -1253,7 +1253,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects(), bokehLevel)
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
     }
 
     private fun updateFinishButtons() {

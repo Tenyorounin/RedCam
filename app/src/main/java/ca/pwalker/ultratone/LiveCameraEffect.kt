@@ -33,7 +33,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("depthEnabled", 0)
         shader.setIntUniform("glowEnabled", 0)
         shader.setIntUniform("vignetteEnabled", 0)
-        shader.setFloatUniform("bokehScale", 1f)
         shader.setFloatUniform("viewSize", 1f, 1f)
         shader.setFloatUniform("depthScale", 1f, 1f)
         shader.setFloatUniform("depthOffset", 0f, 0f)
@@ -42,7 +41,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
 
-    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects(), bokehLevel: Int = 0) {
+    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects()) {
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
@@ -60,8 +59,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         })
         shader.setIntUniform("glowEnabled", if (effects.glow) 1 else 0)
         shader.setIntUniform("vignetteEnabled", if (effects.vignette) 1 else 0)
-        // Keep each tap visibly distinct when cycling the Close-up bokeh levels.
-        shader.setFloatUniform("bokehScale", when (bokehLevel.coerceIn(0, 2)) { 0 -> 1f; 1 -> 2f; else -> 3.2f })
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
         shader.setIntUniform("nightEnhancement", if (nightEnhancement && mode == ReferenceRenderer.Mode.NIGHT) 1 else 0)
         shader.setFloatUniform("strength", strength.coerceIn(0f, 1f))
@@ -157,7 +154,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform int depthEnabled;
             uniform int glowEnabled;
             uniform int vignetteEnabled;
-            uniform float bokehScale;
             uniform float2 viewSize;
             uniform float2 depthScale;
             uniform float2 depthOffset;
@@ -235,7 +231,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     float blur = smoothstep(0.055, 0.42, separation);
                     blur = blur * blur * 0.88;
                     blur *= 1.0 - smoothstep(0.30, 0.78, guide.g);
-                    float radius = blur * 34.0 * bokehScale;
+                    float radius = blur * 34.0;
                     float2 dx = float2(radius, 0.0);
                     float2 dy = float2(0.0, radius);
                     float2 dd = float2(radius * 0.70, radius * 0.70);
