@@ -38,7 +38,7 @@ object PortraitBlur {
         fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result =
             PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
 
-        /** Builds compact depth and photographic bokeh guides for the GPU live preview. */
+        /** Builds compact depth and foreground guides for the GPU live preview. */
         fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float): PreviewGuides? {
             return PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY)
         }
@@ -91,7 +91,7 @@ object PortraitBlur {
         val guideHeight = max(1, (source.height * guideScale).toInt())
         val guide = IntArray(guideWidth * guideHeight)
         for (y in 0 until guideHeight) {
-            val depthY = if (depth != null) min(depth.height - 1, y * depth.height / guideHeight) else 0
+            val depthY = min(depth.height - 1, y * depth.height / guideHeight)
             val maskY = if (mask != null) min(maskHeight - 1, y * maskHeight / guideHeight) else 0
             if (confidence != null) {
                 for (row in -1..1) {
@@ -113,14 +113,8 @@ object PortraitBlur {
                     }
                     edgeProtected.coerceIn(0f, 1f)
                 } else 0f
-                // With no depth model output, use the person mask as a two-plane depth guide.
-                // That keeps the live Close-up effect working for people instead of silently
-                // disabling Bokeh for the whole preview.
-                val relative = if (depth != null) {
-                    val depthX = min(depth.width - 1, x * depth.width / guideWidth)
-                    val index = depthY * depth.width + depthX
-                    ((depth.values[index] - low) / span).coerceIn(0f, 1f)
-                } else person
+                val depthX = min(depth.width - 1, x * depth.width / guideWidth)
+                val relative = ((depth.values[depthY * depth.width + depthX] - low) / span).coerceIn(0f, 1f)
                 val depthByte = (relative * 255f + 0.5f).toInt().coerceIn(0, 255)
                 val personByte = (person * 255f + 0.5f).toInt().coerceIn(0, 255)
                 guide[y * guideWidth + x] = Color.rgb(depthByte, personByte, 0)
@@ -210,8 +204,10 @@ object PortraitBlur {
         return Result(output, peopleFound, true)
     }
 
-    /** Circular-aperture gathering on a reduced working image. Highlight RGB values are
-     * preserved by the kernel, so lamps and reflections form naturally colored circles. */
+    /** Layered, occlusion-aware circular-aperture renderer on a reduced working image.
+     * The sharp layer is excluded from the blur input. Its color is extended under the
+     * foreground boundary before the background layer is blurred, then the sharp source
+     * is composited back according to the depth and person mattes. */
     private fun renderApertureBlur(
         source: Bitmap,
         depth: RelativeDepthEstimator.DepthMap,
@@ -230,8 +226,9 @@ object PortraitBlur {
         val input = IntArray(width * height)
         small.getPixels(input, 0, width, 0, 0, width, height)
         if (small !== source) small.recycle()
-        val output = IntArray(input.size)
         val maxRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 5f; 1 -> 10f; else -> 16f }
+        val blurAmounts = FloatArray(input.size)
+        val backgroundEligible = BooleanArray(input.size)
         val offsets = ArrayList<Pair<Float, Float>>(29)
         for (iy in -3..3) for (ix in -3..3) {
             val ox = ix / 3f
@@ -243,18 +240,37 @@ object PortraitBlur {
             val sy = min(depth.height - 1, y * source.height / height)
             return ((depth.values[sy * depth.width + sx] - low) / span).coerceIn(0f, 1f)
         }
-        fun personAt(x: Int, y: Int): Float {
+        fun personWeightAt(x: Int, y: Int): Float {
             if (personMask == null || maskWidth <= 0 || maskHeight <= 0) return 0f
             val sx = min(maskWidth - 1, x * maskWidth / width)
             val sy = min(maskHeight - 1, y * maskHeight / height)
-            return personMask.get(sy * maskWidth + sx).coerceIn(0f, 1f)
+            val confidence = personMask.get(sy * maskWidth + sx).coerceIn(0f, 1f)
+            return smoothstep(((confidence - 0.12f) / (0.48f - 0.12f)).coerceIn(0f, 1f))
         }
         for (y in 0 until height) for (x in 0 until width) {
             val center = y * width + x
-            val relative = depthAt(x, y)
-            val amount = defocusAmount(relative, focus)
-            if (amount < 0.04f || personAt(x, y) > 0.18f) {
-                output[center] = input[center]
+            val person = personWeightAt(x, y)
+            val amount = defocusAmount(depthAt(x, y), focus) * (1f - person)
+            blurAmounts[center] = amount
+            backgroundEligible[center] = amount > 0.04f && person < 0.18f
+        }
+
+        // Dr.Bokeh's layered representation needs RGB behind foreground edges. A
+        // bounded two-layer nearest-background fill supplies that hidden color without
+        // adding a large neural inpainting model to the phone app.
+        val nearestBackground = propagateNearestBackground(backgroundEligible, width, height, ceilRadius(maxRadius))
+        val backgroundLayer = IntArray(input.size)
+        for (i in input.indices) {
+            val nearest = nearestBackground[i]
+            backgroundLayer[i] = if (nearest >= 0) input[nearest] else input[i]
+        }
+
+        val output = IntArray(input.size)
+        for (y in 0 until height) for (x in 0 until width) {
+            val center = y * width + x
+            val amount = blurAmounts[center]
+            if (amount < 0.04f) {
+                output[center] = backgroundLayer[center]
                 continue
             }
             val radius = maxRadius * amount
@@ -262,16 +278,77 @@ object PortraitBlur {
             for ((ox, oy) in offsets) {
                 val sx = (x + ox * radius).roundToInt().coerceIn(0, width - 1)
                 val sy = (y + oy * radius).roundToInt().coerceIn(0, height - 1)
-                if (defocusAmount(depthAt(sx, sy), focus) < 0.06f || personAt(sx, sy) > 0.18f) continue
-                val c = input[sy * width + sx]
+                val c = backgroundLayer[sy * width + sx]
                 red += Color.red(c); green += Color.green(c); blue += Color.blue(c); total += 1f
             }
-            output[center] = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else input[center]
+            val blurred = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else backgroundLayer[center]
+            output[center] = blurred
         }
         val blurred = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         blurred.setPixels(output, 0, width, 0, 0, width, height)
         return if (width == source.width && height == source.height) blurred
             else Bitmap.createScaledBitmap(blurred, source.width, source.height, true).also { blurred.recycle() }
+    }
+
+    private fun ceilRadius(radius: Float): Int = kotlin.math.ceil(radius.toDouble()).toInt() + 1
+
+    /** Two forward/backward nearest-source sweeps, limited to the largest CoC radius. */
+    private fun propagateNearestBackground(eligible: BooleanArray, width: Int, height: Int, maxRadius: Int): IntArray {
+        val nearest = IntArray(eligible.size) { index -> if (eligible[index]) index else -1 }
+        val maxDistanceSquared = maxRadius * maxRadius
+        val forwardDx = intArrayOf(-1, -1, 0, 1)
+        val forwardDy = intArrayOf(0, -1, -1, -1)
+        val backwardDx = intArrayOf(1, 1, 0, -1)
+        val backwardDy = intArrayOf(0, 1, 1, 1)
+        repeat(2) {
+            for (y in 0 until height) for (x in 0 until width) {
+                val index = y * width + x
+                if (!eligible[index]) nearest[index] = closestBackground(
+                    nearest, width, height, x, y, nearest[index], forwardDx, forwardDy, maxDistanceSquared
+                )
+            }
+            for (y in height - 1 downTo 0) for (x in width - 1 downTo 0) {
+                val index = y * width + x
+                if (!eligible[index]) nearest[index] = closestBackground(
+                    nearest, width, height, x, y, nearest[index], backwardDx, backwardDy, maxDistanceSquared
+                )
+            }
+        }
+        return nearest
+    }
+
+    private fun closestBackground(
+        nearest: IntArray,
+        width: Int,
+        height: Int,
+        x: Int,
+        y: Int,
+        current: Int,
+        offsetsX: IntArray,
+        offsetsY: IntArray,
+        maxDistanceSquared: Int
+    ): Int {
+        var best = current
+        var bestDistance = if (best >= 0) distanceSquared(best, width, x, y) else Int.MAX_VALUE
+        for (i in offsetsX.indices) {
+            val nx = x + offsetsX[i]
+            val ny = y + offsetsY[i]
+            if (nx !in 0 until width || ny !in 0 until height) continue
+            val candidate = nearest[ny * width + nx]
+            if (candidate < 0) continue
+            val distance = distanceSquared(candidate, width, x, y)
+            if (distance < bestDistance && distance <= maxDistanceSquared) {
+                best = candidate
+                bestDistance = distance
+            }
+        }
+        return best
+    }
+
+    private fun distanceSquared(index: Int, width: Int, x: Int, y: Int): Int {
+        val dx = index % width - x
+        val dy = index / width - y
+        return dx * dx + dy * dy
     }
 
     private fun defocusAmount(relative: Float, focus: Float): Float {
