@@ -215,9 +215,9 @@ object PortraitBlur {
 
     private fun liveGuideBlurAmount(sample: Int, focusDepth: Float): Float {
         val separation = abs(Color.red(sample) / 255f - focusDepth)
-        var blur = smoothstep(((separation - 0.055f) / (0.42f - 0.055f)).coerceIn(0f, 1f))
+        var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
         blur = blur * blur * 0.88f
-        return blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.30f) / (0.78f - 0.30f)).coerceIn(0f, 1f)))
+        return blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f)))
     }
 
     private fun applyDepth(
@@ -252,13 +252,13 @@ object PortraitBlur {
             val relative = ((depth.values[my * depth.width + mx] - low) / span).coerceIn(0f, 1f)
             val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
             val separation = abs(relative - focused)
-            var blur = smoothstep(((separation - 0.055f) / (0.42f - 0.055f)).coerceIn(0f, 1f))
+            var blur = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
             blur = blur * blur * 0.88f
             if (confidence != null && mask != null) {
                 val maskX = min(maskWidth - 1, x * maskWidth / source.width)
                 val maskY = min(maskHeight - 1, y * maskHeight / source.height)
                 val person = confidence.get(maskY * maskWidth + maskX).coerceIn(0f, 1f)
-                blur *= 1f - smoothstep(((person - 0.30f) / 0.50f).coerceIn(0f, 1f))
+                blur *= 1f - smoothstep(((person - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f))
             }
             blur
         }
@@ -284,11 +284,11 @@ object PortraitBlur {
                 val focused = ((focusDepth - low) / span).coerceIn(0f, 1f)
                 val separation = abs(relative - focused)
                 // A soft focus band avoids making the selected plane look artificially cut out.
-                var blurAmount = ((separation - 0.055f) / 0.42f).coerceIn(0f, 1f)
+                var blurAmount = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
                 blurAmount *= blurAmount * 0.88f
                 if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / source.width)
-                    val person = smoothstep(((confidenceRow[maskX] - 0.30f) / 0.50f).coerceIn(0f, 1f))
+                    val person = smoothstep(((confidenceRow[maskX] - 0.18f) / (0.62f - 0.18f)).coerceIn(0f, 1f))
                     if (person > 0.65f) subjectPixels++
                     blurAmount *= 1f - person
                 }

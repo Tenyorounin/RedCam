@@ -229,9 +229,9 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     float2 dp = p * depthScale + depthOffset;
                     float4 guide = depthGuide.eval(dp);
                     float separation = abs(guide.r - focusDepth);
-                    float blur = smoothstep(0.055, 0.42, separation);
+                    float blur = smoothstep(0.12, 0.50, separation);
                     blur = blur * blur * 0.88;
-                    blur *= 1.0 - smoothstep(0.30, 0.78, guide.g);
+                    blur *= 1.0 - smoothstep(0.18, 0.62, guide.g);
                     if (blur > 0.002) {
                         // Softly overlap circular apertures across the whole defocused
                         // region. This is the same depth-dependent radius used by the
