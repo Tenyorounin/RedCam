@@ -80,18 +80,22 @@ class MainActivity : ComponentActivity() {
     private lateinit var processedPreviewView: ImageView
     private lateinit var imageView: ImageView
     private lateinit var status: TextView
+    private lateinit var topBar: LinearLayout
+    private lateinit var longExposureHint: TextView
     private lateinit var strength: SeekBar
     private lateinit var strengthRow: LinearLayout
     private lateinit var exposureRow: LinearLayout
     private lateinit var exposure: SeekBar
     private lateinit var exposureLabel: TextView
     private lateinit var detailMergeButton: TextView
+    private lateinit var bokehButton: TextView
     private lateinit var nightEnhancementButton: TextView
     private lateinit var creativeEffectsRow: LinearLayout
     private val creativeEffectButtons = mutableMapOf<String, TextView>()
     private lateinit var focusIndicator: View
     private var exposureRange = 0..0
     @Volatile private var multiFrameDetailEnabled = false
+    @Volatile private var bokehLevel = 0
     @Volatile private var nightEnhancementEnabled = false
     @Volatile private var infinityFocusEnabled = false
     @Volatile private var glowEnabled = false
@@ -205,6 +209,7 @@ class MainActivity : ComponentActivity() {
         analysisExecutor = Executors.newSingleThreadExecutor()
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
+        bokehLevel = getPreferences(MODE_PRIVATE).getInt("bokeh_level", 0).coerceIn(0, 2)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
         glowEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_glow", false)
@@ -268,18 +273,18 @@ class MainActivity : ComponentActivity() {
 
         val overlay = FrameLayout(this)
         controlOverlay = overlay
-        val top = LinearLayout(this).apply {
+        topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
         flashButton = pill("⚡ Off") { cycleFlash() }
-        top.addView(flashButton, LinearLayout.LayoutParams(dp(76), dp(36)))
+        topBar.addView(flashButton, LinearLayout.LayoutParams(dp(76), dp(36)))
         infinityFocusButton = pill("AF") { toggleInfinityFocus() }.apply {
             contentDescription = "Switch to infinity focus with blur disabled"
             isEnabled = false
             alpha = 0.5f
         }
-        top.addView(infinityFocusButton, LinearLayout.LayoutParams(dp(44), dp(36)).apply { marginStart = dp(6) })
+        topBar.addView(infinityFocusButton, LinearLayout.LayoutParams(dp(44), dp(36)).apply { marginStart = dp(6) })
         status = TextView(this).apply {
             textSize = 14f
             gravity = Gravity.CENTER
@@ -289,11 +294,11 @@ class MainActivity : ComponentActivity() {
             visibility = View.GONE
             maxLines = 2
         }
-        top.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+        topBar.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginStart = dp(12); marginEnd = dp(12)
         })
-        top.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(42), dp(36)))
-        overlay.addView(top, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+        topBar.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(42), dp(36)))
+        overlay.addView(topBar, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
         zoomRow = LensZoomControl(this).apply {
             onZoomChanged = ::selectZoom
             contentDescription = "Camera zoom slider. Yellow marks show lens changes."
@@ -396,9 +401,16 @@ class MainActivity : ComponentActivity() {
             visibility = View.GONE
             textSize = 12f
             maxLines = 1
-            contentDescription = "Two-frame deblur and detail merge. Off"
+            contentDescription = "Photo stack, two-frame deblur. Off"
         }
         updateDetailMergeButton()
+
+        bokehButton = pill("") { cycleBokeh() }.apply {
+            textSize = 12f
+            maxLines = 1
+            contentDescription = "Bokeh strength for Close-up mode, Normal"
+        }
+        updateBokehButton()
 
         nightEnhancementButton = pill("") { toggleNightEnhancement() }.apply {
             visibility = View.GONE
@@ -512,6 +524,9 @@ class MainActivity : ComponentActivity() {
         moreMenuPanel.addView(detailMergeButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        moreMenuPanel.addView(bokehButton, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
+        ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         moreMenuPanel.addView(nightEnhancementButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
@@ -520,6 +535,22 @@ class MainActivity : ComponentActivity() {
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         overlay.addView(moreMenuPanel)
+        longExposureHint = TextView(this).apply {
+            text = "Press and hold"
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            background = roundedStroke(0xb3111216.toInt(), 0x99ffffff.toInt(), 1, 18)
+            visibility = View.GONE
+            isClickable = false
+            isFocusable = false
+            elevation = dp(7).toFloat()
+            contentDescription = "Long exposure mode. Press and hold the shutter to take a longer exposure."
+        }
+        overlay.addView(longExposureHint, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
+        ))
         landscapeActions = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
@@ -575,7 +606,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        applyStatusPlacement(landscape)
+        updateLongExposureHint()
         applyControlSizing(landscape)
+    }
+
+    private fun applyStatusPlacement(landscape: Boolean) {
+        if (!::status.isInitialized || !::topBar.isInitialized || !::controlOverlay.isInitialized) return
+        (status.parent as? ViewGroup)?.removeView(status)
+        if (landscape) {
+            controlOverlay.addView(status, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { bottomMargin = dp(12) })
+        } else {
+            topBar.addView(status, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ).apply { marginStart = dp(12); marginEnd = dp(12) })
+        }
     }
 
     private fun buildNightCaptureIndicator(root: FrameLayout) {
@@ -1079,7 +1127,7 @@ class MainActivity : ComponentActivity() {
                     focusX, focusY, previewView.width, previewView.height, colorized.width, colorized.height,
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
-                val portrait = segmenter.apply(colorized, focus.first, focus.second)
+                val portrait = segmenter.apply(colorized, focus.first, focus.second, bokehLevel)
                 output = portrait.bitmap
                 if (output !== colorized) colorized.recycle()
             } else {
@@ -1165,6 +1213,7 @@ class MainActivity : ComponentActivity() {
         updateMoreMenu()
         sourceBitmap?.let { renderImported(it) }
         if (previewView.visibility == View.VISIBLE && cameraProvider != null) requestCameraRebind()
+        updateLongExposureHint()
     }
 
     /**
@@ -1197,7 +1246,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects(), bokehLevel)
     }
 
     private fun updateFinishButtons() {
@@ -1285,10 +1334,41 @@ class MainActivity : ComponentActivity() {
     private fun updateDetailMergeButton() {
         if (!::detailMergeButton.isInitialized) return
         val state = if (multiFrameDetailEnabled) "On" else "Off"
-        detailMergeButton.text = "Detail merge: $state"
+        detailMergeButton.text = "Photo stack: $state"
         detailMergeButton.setTextColor(if (multiFrameDetailEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
         detailMergeButton.setTypeface(null, if (multiFrameDetailEnabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-        detailMergeButton.contentDescription = "Two-frame deblur and detail merge, $state"
+        detailMergeButton.contentDescription = "Photo stack, two-frame deblur, $state"
+    }
+
+    private fun cycleBokeh() {
+        bokehLevel = (bokehLevel + 1) % 3
+        getPreferences(MODE_PRIVATE).edit().putInt("bokeh_level", bokehLevel).apply()
+        updateBokehButton()
+        updateLiveLook()
+        sourceBitmap?.let { renderImported(it) }
+    }
+
+    private fun updateBokehButton() {
+        if (!::bokehButton.isInitialized) return
+        val label = bokehLabel(bokehLevel)
+        bokehButton.text = "Bokeh: $label"
+        bokehButton.setTypeface(null, if (bokehLevel == 0) android.graphics.Typeface.NORMAL else android.graphics.Typeface.BOLD)
+        bokehButton.setTextColor(if (bokehLevel == 0) 0xfff2f2f4.toInt() else 0xffffd28c.toInt())
+        bokehButton.contentDescription = "Bokeh strength for Close-up mode, $label. Tap to cycle."
+    }
+
+    private fun bokehLabel(level: Int) = when (level.coerceIn(0, 2)) {
+        1 -> "Extra"
+        2 -> "Max"
+        else -> "Normal"
+    }
+
+    private fun updateLongExposureHint() {
+        if (!::longExposureHint.isInitialized) return
+        longExposureHint.visibility = if (
+            previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE &&
+            !longExposureHoldActive && !isBusy && pendingPhotoCount == 0
+        ) View.VISIBLE else View.GONE
     }
 
     private fun toggleNightEnhancement() {
@@ -1345,11 +1425,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateMoreMenu() {
-        if (!::detailMergeButton.isInitialized || !::nightEnhancementButton.isInitialized) return
+        if (!::detailMergeButton.isInitialized || !::bokehButton.isInitialized || !::nightEnhancementButton.isInitialized) return
         val show = moreMenuExpanded && previewView.visibility == View.VISIBLE
         if (::moreMenuPanel.isInitialized) moreMenuPanel.visibility = if (show) View.VISIBLE else View.GONE
         strengthRow.visibility = if (show) View.VISIBLE else View.GONE
         detailMergeButton.visibility = if (show) View.VISIBLE else View.GONE
+        bokehButton.visibility = if (show) View.VISIBLE else View.GONE
         nightEnhancementButton.visibility = if (show && activeMode == ReferenceRenderer.Mode.NIGHT) View.VISIBLE else View.GONE
         creativeEffectsRow.visibility = if (show) View.VISIBLE else View.GONE
         if (::exposureRow.isInitialized && previewView.visibility == View.VISIBLE) updateExposureControl(show)
@@ -1396,6 +1477,7 @@ class MainActivity : ComponentActivity() {
         )
         isBusy = true
         pendingPhotoCount++
+        updateLongExposureHint()
         setStatusMessage("Long exposure · 0.0 s · hold shutter")
         longExposureHandler.removeCallbacks(longExposureTicker)
         longExposureHandler.postDelayed(longExposureTicker, LONG_EXPOSURE_TICK_MILLIS)
@@ -1556,6 +1638,7 @@ class MainActivity : ComponentActivity() {
         val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
         val infinityFocusAtCapture = infinityFocusEnabled
         val effectsAtCapture = currentEffects()
+        val bokehLevelAtCapture = bokehLevel
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
@@ -1577,7 +1660,7 @@ class MainActivity : ComponentActivity() {
                     photoProcessingExecutor.execute {
                         try {
                             val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
-                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1593,7 +1676,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (detailMergeAtCapture) {
-            setStatusMessage("Capturing detail frames…")
+            setStatusMessage("Capturing photo stack frames…")
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
                 if (frames == null) {
                     runOnUiThread {
@@ -1601,7 +1684,7 @@ class MainActivity : ComponentActivity() {
                         setNightCaptureActive(false)
                         pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                         refreshShutterAvailability()
-                        message("Detail capture failed; try again with the phone steadier.")
+                        message("Photo stack capture failed; try again with the phone steadier.")
                         updateStatus()
                     }
                 } else {
@@ -1609,19 +1692,19 @@ class MainActivity : ComponentActivity() {
                         releaseCaptureAndApplyPendingRebind()
                         setNightCaptureActive(false)
                         refreshShutterAvailability()
-                        setStatusMessage("Merging detail frames…")
+                        setStatusMessage("Building photo stack…")
                         showQueueStatus()
                     }
                     photoProcessingExecutor.execute {
                         try {
                             val merged = NightBurstMerger.mergeDetail(frames)
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
-                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                                 refreshShutterAvailability()
-                                message("Detail merge failed: ${e.localizedMessage ?: "unknown error"}")
+                                message("Photo stack failed: ${e.localizedMessage ?: "unknown error"}")
                                 updateStatus()
                             }
                         }
@@ -1680,7 +1763,7 @@ class MainActivity : ComponentActivity() {
                         val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
                             decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image")
                         processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
-                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture)
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
                     } catch (e: Exception) {
                         runOnUiThread {
                             pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1740,17 +1823,25 @@ class MainActivity : ComponentActivity() {
             setWillNotDraw(false)
             isClickable = false
             isFocusable = false
+            pivotX = photoFeedbackLayer.width / 2f
+            pivotY = photoFeedbackLayer.height / 2f + activePreview.translationY
         }
         photoFeedbackLayer.removeAllViews()
         photoFeedbackLayer.addView(frame, FrameLayout.LayoutParams(-1, -1))
         activePreview.animate().cancel()
+        frame.animate().cancel()
         activePreview.scaleX = 1f
         activePreview.scaleY = 1f
-        activePreview.animate().scaleX(0.965f).scaleY(0.965f).setDuration(95L)
-            .withEndAction { activePreview.animate().scaleX(1f).scaleY(1f).setDuration(155L).start() }
+        frame.scaleX = 1f
+        frame.scaleY = 1f
+        activePreview.animate().scaleX(0.94f).scaleY(0.94f).setDuration(85L)
+            .withEndAction { activePreview.animate().scaleX(1f).scaleY(1f).setDuration(190L).start() }
             .start()
-        frame.animate().alpha(0f).setStartDelay(95L).setDuration(160L)
-            .withEndAction { photoFeedbackLayer.removeView(frame) }
+        frame.animate().scaleX(0.94f).scaleY(0.94f).setDuration(85L)
+            .withEndAction {
+                frame.animate().alpha(0f).scaleX(1f).scaleY(1f).setDuration(190L)
+                    .withEndAction { photoFeedbackLayer.removeView(frame) }.start()
+            }
             .start()
     }
 
@@ -1803,7 +1894,8 @@ class MainActivity : ComponentActivity() {
         finishAtCapture: ReferenceRenderer.Finish,
         nightEnhanceAtCapture: Boolean = false,
         infinityFocusAtCapture: Boolean = false,
-        effectsAtCapture: ReferenceRenderer.Effects = ReferenceRenderer.Effects()
+        effectsAtCapture: ReferenceRenderer.Effects = ReferenceRenderer.Effects(),
+        bokehLevelAtCapture: Int = 0
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -1819,7 +1911,7 @@ class MainActivity : ComponentActivity() {
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
             val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
-                PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
+                PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture)
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
@@ -1887,6 +1979,7 @@ class MainActivity : ComponentActivity() {
                     previewView.visibility = View.GONE
                     imageView.visibility = View.VISIBLE
                     zoomRow.visibility = View.GONE
+                    updateLongExposureHint()
                     modeRow.visibility = View.VISIBLE
                     finishRow.visibility = View.VISIBLE
                     captureControls.visibility = View.GONE
@@ -1905,6 +1998,7 @@ class MainActivity : ComponentActivity() {
 
     private fun renderImported(source: Bitmap) {
         val mode = activeMode
+        val bokehLevelForRender = bokehLevel
         cameraExecutor.execute {
             try {
                 val styled = ReferenceRenderer.render(source, styleStrength, mode, finish = activeFinish, effects = currentEffects())
@@ -1913,7 +2007,7 @@ class MainActivity : ComponentActivity() {
                     source.width, source.height, false
                 )
                 val portrait = if (mode == ReferenceRenderer.Mode.CLOSE_UP) (try {
-                    PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second)
+                    PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelForRender)
                 } catch (_: Exception) { null }) else null
                 val output = portrait?.bitmap ?: styled
                 if (output !== styled) styled.recycle()
@@ -1955,6 +2049,7 @@ class MainActivity : ComponentActivity() {
         captureControls.visibility = View.VISIBLE
         editControls.visibility = View.GONE
         if (cameraProvider != null) bindCamera()
+        updateLongExposureHint()
     }
 
     /** Let the render thread finish any queued draw before releasing an old preview bitmap. */
@@ -2018,6 +2113,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshShutterAvailability() {
         if (!::shutterButton.isInitialized) return
         shutterButton.isEnabled = imageCapture != null && !isBusy && pendingPhotoCount < maxPendingPhotos
+        updateLongExposureHint()
     }
 
     private fun pill(label: String, action: () -> Unit): TextView = TextView(this).apply {

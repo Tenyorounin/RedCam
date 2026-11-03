@@ -18,11 +18,11 @@ import kotlin.math.min
 object PortraitBlur {
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
 
-    fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f): Result {
+    fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
         val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
         )
-        return try { apply(context, source, segmenter, focusX, focusY) } finally { segmenter.close() }
+        return try { apply(context, source, segmenter, focusX, focusY, bokehLevel) } finally { segmenter.close() }
     }
 
     /** Runs at a reduced frame rate on live preview frames; depth inference is intentionally best-effort. */
@@ -32,8 +32,8 @@ object PortraitBlur {
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
         )
 
-        fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f): Result =
-            PortraitBlur.apply(appContext, source, segmenter, focusX, focusY)
+        fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result =
+            PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
 
         /** Builds a compact depth/person guide for the GPU live-preview blur. */
         fun createDepthGuide(source: Bitmap): Bitmap? = PortraitBlur.createDepthGuide(appContext, source, segmenter)
@@ -46,14 +46,15 @@ object PortraitBlur {
         source: Bitmap,
         segmenter: Segmenter,
         focusX: Float,
-        focusY: Float
+        focusY: Float,
+        bokehLevel: Int
     ): Result {
         val mask = try {
             Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS)
         } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
-        return if (depth != null) applyDepth(source, mask, depth, focusX, focusY)
-        else if (mask != null) applyMaskFallback(source, mask)
+        return if (depth != null) applyDepth(source, mask, depth, focusX, focusY, bokehLevel)
+        else if (mask != null) applyMaskFallback(source, mask, bokehLevel)
         else Result(source, false, false)
     }
 
@@ -107,7 +108,8 @@ object PortraitBlur {
         mask: com.google.mlkit.vision.segmentation.SegmentationMask?,
         depth: RelativeDepthEstimator.DepthMap,
         focusX: Float,
-        focusY: Float
+        focusY: Float,
+        bokehLevel: Int
     ): Result {
         val ordered = depth.values.sortedArray()
         val low = ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)]
@@ -123,7 +125,7 @@ object PortraitBlur {
         }
         focusSamples.sort()
         val focusDepth = focusSamples[focusSamples.size / 2]
-        val background = blurredBackground(source)
+        val background = blurredBackground(source, bokehLevel)
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         val row = IntArray(source.width)
         val bgRow = IntArray(source.width)
@@ -168,12 +170,13 @@ object PortraitBlur {
     /** People-only safety fallback for the rare case where depth model initialization fails. */
     private fun applyMaskFallback(
         source: Bitmap,
-        mask: com.google.mlkit.vision.segmentation.SegmentationMask
+        mask: com.google.mlkit.vision.segmentation.SegmentationMask,
+        bokehLevel: Int
     ): Result {
         val maskWidth = mask.width
         val maskHeight = mask.height
         val values = mask.buffer.order(ByteOrder.nativeOrder()).asFloatBuffer().apply { position(0) }
-        val background = blurredBackground(source)
+        val background = blurredBackground(source, bokehLevel)
         val output = source.copy(Bitmap.Config.ARGB_8888, true)
         val row = IntArray(source.width)
         val bgRow = IntArray(source.width)
@@ -201,15 +204,16 @@ object PortraitBlur {
         }
     }
 
-    private fun blurredBackground(source: Bitmap): Bitmap {
+    private fun blurredBackground(source: Bitmap, bokehLevel: Int): Bitmap {
         val scale = 8
+        val blurRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 2; 1 -> 3; else -> 4 }
         val width = max(1, source.width / scale)
         val height = max(1, source.height / scale)
         val small = Bitmap.createScaledBitmap(source, width, height, true)
         var pixels = IntArray(width * height)
         small.getPixels(pixels, 0, width, 0, 0, width, height)
         small.recycle()
-        repeat(3) { pixels = boxBlur(pixels, width, height, 2) }
+        repeat(3) { pixels = boxBlur(pixels, width, height, blurRadius) }
         val blurredSmall = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         blurredSmall.setPixels(pixels, 0, width, 0, 0, width, height)
         return Bitmap.createScaledBitmap(blurredSmall, source.width, source.height, true).also { blurredSmall.recycle() }

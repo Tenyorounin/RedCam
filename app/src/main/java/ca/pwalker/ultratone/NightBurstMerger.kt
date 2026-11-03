@@ -21,12 +21,12 @@ object NightBurstMerger {
     data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
 
     /**
-     * Two-frame detail merge for the optional deblur mode. Start with whichever
+     * Two-frame photo stack for the optional deblur mode. Start with whichever
      * capture has more fine detail, then blend only aligned, stable pixels from
      * its partner. This keeps moving edges from becoming double images.
      */
     fun mergeDetail(frames: List<Frame>): Bitmap {
-        require(frames.size == 2) { "Detail merge expects two captures" }
+        require(frames.size == 2) { "Photo stack expects two captures" }
         val firstScore = sharpnessScore(frames[0])
         val secondScore = sharpnessScore(frames[1])
         val referenceFirst = secondScore <= firstScore * 1.02
