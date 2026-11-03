@@ -701,7 +701,6 @@ class MainActivity : ComponentActivity() {
 
         focusX = (previewX / previewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
         focusY = (previewY / previewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
-        liveCameraEffect?.setFocus(focusX, focusY)
         showFocusIndicator(previewX, previewY)
 
         try {
@@ -1133,7 +1132,7 @@ class MainActivity : ComponentActivity() {
                 if (guides != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
-                            effect.updateDepthGuide(guides.depth, guides.bokeh)
+                            effect.updateDepthGuide(guides.depth, guides.bokeh, guides.focusDepth)
                         } else {
                             if (!guides.depth.isRecycled) guides.depth.recycle()
                             if (!guides.bokeh.isRecycled) guides.bokeh.recycle()
@@ -1143,8 +1142,8 @@ class MainActivity : ComponentActivity() {
                 if (bokeh != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
-                            effect.updateBokehGuide(bokeh)
-                        } else if (!bokeh.isRecycled) bokeh.recycle()
+                            effect.updateBokehGuide(bokeh.bitmap, bokeh.focusDepth)
+                        } else if (!bokeh.bitmap.isRecycled) bokeh.bitmap.recycle()
                     }
                 }
                 return

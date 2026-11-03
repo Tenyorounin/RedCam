@@ -29,8 +29,10 @@ object PortraitBlur {
         val bokeh: Bitmap,
         val depthValues: IntArray,
         val width: Int,
-        val height: Int
+        val height: Int,
+        val focusDepth: Float
     )
+    data class PreviewBokehGuide(val bitmap: Bitmap, val focusDepth: Float)
 
     fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
         val segmenter = Segmentation.getClient(
@@ -63,7 +65,7 @@ object PortraitBlur {
             return guides
         }
 
-        fun createBokehGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): Bitmap =
+        fun createBokehGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): PreviewBokehGuide =
             PortraitBlur.createBokehGuide(source, latestDepthValues, latestGuideWidth, latestGuideHeight, focusX, focusY, bokehLevel)
 
         override fun close() {
@@ -111,7 +113,7 @@ object PortraitBlur {
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
         val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }
-        val confidenceRow = FloatArray(maskWidth)
+        val confidenceRows = Array(3) { FloatArray(maskWidth) }
         val guideScale = 256f / max(source.width, source.height)
         val guideWidth = max(1, (source.width * guideScale).toInt())
         val guideHeight = max(1, (source.height * guideScale).toInt())
@@ -120,13 +122,24 @@ object PortraitBlur {
             val depthY = if (depth != null) min(depth.height - 1, y * depth.height / guideHeight) else 0
             val maskY = if (mask != null) min(maskHeight - 1, y * maskHeight / guideHeight) else 0
             if (confidence != null) {
-                confidence.position(maskY * maskWidth)
-                confidence.get(confidenceRow, 0, maskWidth)
+                for (row in -1..1) {
+                    val sampleY = (maskY + row).coerceIn(0, maskHeight - 1)
+                    val values = confidenceRows[row + 1]
+                    confidence.position(sampleY * maskWidth)
+                    confidence.get(values, 0, maskWidth)
+                }
             }
             for (x in 0 until guideWidth) {
                 val person = if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / guideWidth)
-                    confidenceRow[maskX].coerceIn(0f, 1f)
+                    var edgeProtected = 0f
+                    // Expand the foreground confidence by one mask pixel so the
+                    // low-resolution matte does not leave a blurred fringe at edges.
+                    for (row in 0..2) for (column in -1..1) {
+                        val sampleX = (maskX + column).coerceIn(0, maskWidth - 1)
+                        edgeProtected = max(edgeProtected, confidenceRows[row][sampleX])
+                    }
+                    edgeProtected.coerceIn(0f, 1f)
                 } else 0f
                 // With no depth model output, use the person mask as a two-plane depth guide.
                 // That keeps the live Close-up effect working for people instead of silently
@@ -142,8 +155,9 @@ object PortraitBlur {
             }
         }
         val depthBitmap = Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
-        val bokeh = createBokehGuide(source, guide, guideWidth, guideHeight, focusX, focusY, bokehLevel)
-        return PreviewGuides(depthBitmap, bokeh, guide, guideWidth, guideHeight)
+        val focusDepth = focusDepthAt(guide, guideWidth, guideHeight, focusX, focusY)
+        val bokeh = renderBokehGuide(source, guide, guideWidth, guideHeight, focusDepth, bokehLevel)
+        return PreviewGuides(depthBitmap, bokeh, guide, guideWidth, guideHeight, focusDepth)
     }
 
     private fun createBokehGuide(
@@ -154,27 +168,49 @@ object PortraitBlur {
         focusX: Float,
         focusY: Float,
         bokehLevel: Int
-    ): Bitmap {
+    ): PreviewBokehGuide {
         val scale = 256f / max(source.width, source.height)
         val width = max(1, (source.width * scale).toInt())
         val height = max(1, (source.height * scale).toInt())
         val small = Bitmap.createScaledBitmap(source, width, height, true)
         if (depthValues == null || guideWidth <= 0 || guideHeight <= 0) {
-            return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+            val empty = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
                 it.eraseColor(Color.TRANSPARENT)
                 if (small !== source) small.recycle()
             }
+            return PreviewBokehGuide(empty, 0.5f)
         }
-        val focusXpx = (focusX.coerceIn(0f, 1f) * (guideWidth - 1)).toInt()
-        val focusYpx = (focusY.coerceIn(0f, 1f) * (guideHeight - 1)).toInt()
-        val focusDepth = Color.red(depthValues[focusYpx * guideWidth + focusXpx]) / 255f
-        val bokeh = createBokehCircles(small, bokehLevel) { x, y ->
-            val gx = min(guideWidth - 1, x * guideWidth / small.width)
-            val gy = min(guideHeight - 1, y * guideHeight / small.height)
-            liveGuideBlurAmount(depthValues[gy * guideWidth + gx], focusDepth)
-        }
+        val focusDepth = focusDepthAt(depthValues, guideWidth, guideHeight, focusX, focusY)
+        val bokeh = renderBokehGuide(small, depthValues, guideWidth, guideHeight, focusDepth, bokehLevel)
         if (small !== source) small.recycle()
-        return bokeh
+        return PreviewBokehGuide(bokeh, focusDepth)
+    }
+
+    private fun renderBokehGuide(
+        source: Bitmap,
+        depthValues: IntArray,
+        guideWidth: Int,
+        guideHeight: Int,
+        focusDepth: Float,
+        bokehLevel: Int
+    ): Bitmap = createBokehCircles(source, bokehLevel) { x, y ->
+        val gx = min(guideWidth - 1, x * guideWidth / source.width)
+        val gy = min(guideHeight - 1, y * guideHeight / source.height)
+        liveGuideBlurAmount(depthValues[gy * guideWidth + gx], focusDepth)
+    }
+
+    private fun focusDepthAt(values: IntArray, width: Int, height: Int, focusX: Float, focusY: Float): Float {
+        val centerX = (focusX.coerceIn(0f, 1f) * (width - 1)).toInt()
+        val centerY = (focusY.coerceIn(0f, 1f) * (height - 1)).toInt()
+        val samples = FloatArray(9)
+        var index = 0
+        for (dy in -1..1) for (dx in -1..1) {
+            val x = (centerX + dx).coerceIn(0, width - 1)
+            val y = (centerY + dy).coerceIn(0, height - 1)
+            samples[index++] = Color.red(values[y * width + x]) / 255f
+        }
+        samples.sort()
+        return samples[samples.size / 2]
     }
 
     private fun liveGuideBlurAmount(sample: Int, focusDepth: Float): Float {
@@ -347,7 +383,7 @@ object PortraitBlur {
             for (x in 2 until width - 2 step 2) {
                 val index = y * width + x
                 val light = luminance[index]
-                if (light < 0.72f) continue
+                if (light < 0.78f) continue
                 var localMaximum = true
                 loop@ for (dy in -2..2) for (dx in -2..2) {
                     if (dx == 0 && dy == 0) continue
@@ -358,6 +394,23 @@ object PortraitBlur {
                     }
                 }
                 if (!localMaximum) continue
+                var brightCore = 0
+                var surroundSum = 0f
+                var surroundCount = 0
+                for (dy in -3..3) for (dx in -3..3) {
+                    if (dx == 0 && dy == 0) continue
+                    val neighbor = luminance[(y + dy) * width + x + dx]
+                    if (neighbor >= light - 0.08f) brightCore++
+                    if (max(abs(dx), abs(dy)) >= 2) {
+                        surroundSum += neighbor
+                        surroundCount++
+                    }
+                }
+                // Flat white objects have many similarly bright neighbors. Bokeh is
+                // reserved for compact, high-contrast highlights that resemble light
+                // sources instead of bright surfaces.
+                val surroundMean = surroundSum / surroundCount.coerceAtLeast(1)
+                if (brightCore > 12 || light - surroundMean < 0.10f) continue
                 val sourceX = min(source.width - 1, x * source.width / width)
                 val sourceY = min(source.height - 1, y * source.height / height)
                 val blur = blurAt(sourceX, sourceY).coerceIn(0f, 1f)

@@ -19,8 +19,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     private var depthBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLACK) }
     private var bokehBitmap: Bitmap? = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
     @Volatile private var mode = ReferenceRenderer.Mode.DAY
-    private var focusX = 0.5f
-    private var focusY = 0.5f
     private var hasFreshDepthGuide = false
     private var infinityFocus = false
     private var bokehLevel = 0
@@ -37,7 +35,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setFloatUniform("viewSize", 1f, 1f)
         shader.setFloatUniform("depthScale", 1f, 1f)
         shader.setFloatUniform("depthOffset", 0f, 0f)
-        shader.setFloatUniform("focusPoint", 0.5f, 0.5f)
+        shader.setFloatUniform("focusDepth", 0.5f)
         view.setLayerType(View.LAYER_TYPE_HARDWARE, null)
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
@@ -74,18 +72,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.postInvalidateOnAnimation()
     }
 
-    fun setFocus(x: Float, y: Float) {
-        focusX = x.coerceIn(0f, 1f)
-        focusY = y.coerceIn(0f, 1f)
-        shader.setFloatUniform(
-            "focusPoint",
-            focusX * view.width.coerceAtLeast(1),
-            focusY * view.height.coerceAtLeast(1)
-        )
-    }
-
     /** Takes ownership of both guide bitmaps and keeps the previous GPU inputs alive briefly. */
-    fun updateDepthGuide(bitmap: Bitmap, bokeh: Bitmap) {
+    fun updateDepthGuide(bitmap: Bitmap, bokeh: Bitmap, focusDepth: Float) {
         val oldDepth = depthBitmap
         depthBitmap = bitmap
         shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
@@ -95,13 +83,14 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         if (oldDepth != null && oldDepth !== bitmap) {
             mainHandler.postDelayed({ if (oldDepth !== depthBitmap && !oldDepth.isRecycled) oldDepth.recycle() }, 2_000L)
         }
-        updateBokehGuide(bokeh)
+        updateBokehGuide(bokeh, focusDepth)
     }
 
     /** Replace only the highlight discs so their positions follow current preview frames. */
-    fun updateBokehGuide(bokeh: Bitmap) {
+    fun updateBokehGuide(bokeh: Bitmap, focusDepth: Float) {
         val oldBokeh = bokehBitmap
         bokehBitmap = bokeh
+        shader.setFloatUniform("focusDepth", focusDepth.coerceIn(0f, 1f))
         shader.setInputShader("bokehGuide", BitmapShader(bokeh, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         if (oldBokeh != null && oldBokeh !== bokeh) {
             mainHandler.postDelayed({ if (oldBokeh !== bokehBitmap && !oldBokeh.isRecycled) oldBokeh.recycle() }, 2_000L)
@@ -139,7 +128,6 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             -offsetX * scaleX,
             -offsetY * scaleY
         )
-        setFocus(focusX, focusY)
     }
 
     fun close() {
@@ -171,7 +159,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform float2 viewSize;
             uniform float2 depthScale;
             uniform float2 depthOffset;
-            uniform float2 focusPoint;
+            uniform float focusDepth;
             uniform float bokehRadius;
 
             float lumaOf(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
@@ -239,9 +227,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                 if (nightEnhancement == 1 && mode == 1) rgb = enhanceNight(p, rgb);
                 if (depthEnabled == 1) {
                     float2 dp = p * depthScale + depthOffset;
-                    float2 fp = focusPoint * depthScale + depthOffset;
                     float4 guide = depthGuide.eval(dp);
-                    float focusDepth = depthGuide.eval(fp).r;
                     float separation = abs(guide.r - focusDepth);
                     float blur = smoothstep(0.055, 0.42, separation);
                     blur = blur * blur * 0.88;
