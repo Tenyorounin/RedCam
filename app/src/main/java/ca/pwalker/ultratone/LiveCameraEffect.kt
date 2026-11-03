@@ -85,17 +85,22 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     /** Takes ownership of both guide bitmaps and keeps the previous GPU inputs alive briefly. */
     fun updateDepthGuide(bitmap: Bitmap, bokeh: Bitmap) {
         val oldDepth = depthBitmap
-        val oldBokeh = bokehBitmap
         depthBitmap = bitmap
-        bokehBitmap = bokeh
         shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
-        shader.setInputShader("bokehGuide", BitmapShader(bokeh, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         hasFreshDepthGuide = true
         shader.setIntUniform("depthEnabled", if (mode == ReferenceRenderer.Mode.CLOSE_UP && hasFreshDepthGuide && !infinityFocus) 1 else 0)
         updateSize()
         if (oldDepth != null && oldDepth !== bitmap) {
             mainHandler.postDelayed({ if (oldDepth !== depthBitmap && !oldDepth.isRecycled) oldDepth.recycle() }, 2_000L)
         }
+        updateBokehGuide(bokeh)
+    }
+
+    /** Replace only the highlight discs so their positions follow current preview frames. */
+    fun updateBokehGuide(bokeh: Bitmap) {
+        val oldBokeh = bokehBitmap
+        bokehBitmap = bokeh
+        shader.setInputShader("bokehGuide", BitmapShader(bokeh, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         if (oldBokeh != null && oldBokeh !== bokeh) {
             mainHandler.postDelayed({ if (oldBokeh !== bokehBitmap && !oldBokeh.isRecycled) oldBokeh.recycle() }, 2_000L)
         }
@@ -244,7 +249,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     ) * 0.125;
                     rgb = mix(rgb, softened, blur);
                     float4 bokeh = bokehGuide.eval(dp);
-                    rgb = clamp(rgb + bokeh.rgb * blur, 0.0, 1.0);
+                    float bokehAmount = smoothstep(0.20, 0.35, blur);
+                    rgb = clamp(rgb + bokeh.rgb * bokehAmount, 0.0, 1.0);
                 }
                 float3 result = grade(rgb);
                 if (glowEnabled == 1) {

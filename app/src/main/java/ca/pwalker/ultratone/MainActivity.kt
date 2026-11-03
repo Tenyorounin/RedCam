@@ -130,6 +130,7 @@ class MainActivity : ComponentActivity() {
     private var liveCameraEffect: LiveCameraEffect? = null
     private var livePortraitProcessor: PortraitBlur.StreamProcessor? = null
     private var lastPreviewFrameNanos = 0L
+    private var lastLiveDepthGuideNanos = 0L
     private var previewCooldownUntilNanos = 0L
     private var livePreviewAvailable = false
     @Volatile private var focusX = 0.5f
@@ -1068,7 +1069,7 @@ class MainActivity : ComponentActivity() {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 1_000_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 250_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -1104,13 +1105,20 @@ class MainActivity : ComponentActivity() {
                 Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, transform, true).also { if (it !== raw) raw.recycle() }
             } else raw
             if (effect != null) {
-                if (infinityFocusEnabled) return
+                if (infinityFocusEnabled) {
+                    oriented.recycle()
+                    return
+                }
                 val processor = livePortraitProcessor ?: PortraitBlur.StreamProcessor(this).also { livePortraitProcessor = it }
+                val currentBokehLevel = bokehLevel
                 val focus = mapFocusToFrame(
                     focusX, focusY, previewView.width, previewView.height, oriented.width, oriented.height,
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
-                val guides = processor.createDepthGuide(oriented, focus.first, focus.second, bokehLevel)
+                val refreshDepth = now - lastLiveDepthGuideNanos >= 1_000_000_000L
+                val guides = if (refreshDepth) processor.createDepthGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
+                if (refreshDepth) lastLiveDepthGuideNanos = System.nanoTime()
+                val bokeh = if (guides == null) processor.createBokehGuide(oriented, focus.first, focus.second, currentBokehLevel) else null
                 oriented.recycle()
                 if (guides != null) {
                     runOnUiThread {
@@ -1120,6 +1128,13 @@ class MainActivity : ComponentActivity() {
                             if (!guides.depth.isRecycled) guides.depth.recycle()
                             if (!guides.bokeh.isRecycled) guides.bokeh.recycle()
                         }
+                    }
+                }
+                if (bokeh != null) {
+                    runOnUiThread {
+                        if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
+                            effect.updateBokehGuide(bokeh)
+                        } else if (!bokeh.isRecycled) bokeh.recycle()
                     }
                 }
                 return

@@ -24,7 +24,13 @@ import kotlin.math.min
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
-    data class PreviewGuides(val depth: Bitmap, val bokeh: Bitmap)
+    data class PreviewGuides(
+        val depth: Bitmap,
+        val bokeh: Bitmap,
+        val depthValues: IntArray,
+        val width: Int,
+        val height: Int
+    )
 
     fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
         val segmenter = Segmentation.getClient(
@@ -39,15 +45,33 @@ object PortraitBlur {
         private val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
         )
+        private var latestDepthValues: IntArray? = null
+        private var latestGuideWidth = 0
+        private var latestGuideHeight = 0
 
         fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result =
             PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
 
         /** Builds compact depth and photographic bokeh guides for the GPU live preview. */
-        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): PreviewGuides? =
-            PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY, bokehLevel)
+        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): PreviewGuides? {
+            val guides = PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY, bokehLevel)
+            if (guides != null) {
+                latestDepthValues = guides.depthValues
+                latestGuideWidth = guides.width
+                latestGuideHeight = guides.height
+            }
+            return guides
+        }
 
-        override fun close() = segmenter.close()
+        fun createBokehGuide(source: Bitmap, focusX: Float, focusY: Float, bokehLevel: Int): Bitmap =
+            PortraitBlur.createBokehGuide(source, latestDepthValues, latestGuideWidth, latestGuideHeight, focusX, focusY, bokehLevel)
+
+        override fun close() {
+            latestDepthValues = null
+            latestGuideWidth = 0
+            latestGuideHeight = 0
+            segmenter.close()
+        }
     }
 
     private fun apply(
@@ -118,19 +142,46 @@ object PortraitBlur {
             }
         }
         val depthBitmap = Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
-        val sourceSmall = Bitmap.createScaledBitmap(source, guideWidth, guideHeight, true)
+        val bokeh = createBokehGuide(source, guide, guideWidth, guideHeight, focusX, focusY, bokehLevel)
+        return PreviewGuides(depthBitmap, bokeh, guide, guideWidth, guideHeight)
+    }
+
+    private fun createBokehGuide(
+        source: Bitmap,
+        depthValues: IntArray?,
+        guideWidth: Int,
+        guideHeight: Int,
+        focusX: Float,
+        focusY: Float,
+        bokehLevel: Int
+    ): Bitmap {
+        val scale = 256f / max(source.width, source.height)
+        val width = max(1, (source.width * scale).toInt())
+        val height = max(1, (source.height * scale).toInt())
+        val small = Bitmap.createScaledBitmap(source, width, height, true)
+        if (depthValues == null || guideWidth <= 0 || guideHeight <= 0) {
+            return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+                it.eraseColor(Color.TRANSPARENT)
+                if (small !== source) small.recycle()
+            }
+        }
         val focusXpx = (focusX.coerceIn(0f, 1f) * (guideWidth - 1)).toInt()
         val focusYpx = (focusY.coerceIn(0f, 1f) * (guideHeight - 1)).toInt()
-        val focusDepth = Color.red(guide[focusYpx * guideWidth + focusXpx]) / 255f
-        val bokeh = createBokehCircles(sourceSmall, bokehLevel) { x, y ->
-            val sample = guide[y * guideWidth + x]
-            val separation = abs(Color.red(sample) / 255f - focusDepth)
-            var blur = smoothstep(((separation - 0.055f) / (0.42f - 0.055f)).coerceIn(0f, 1f))
-            blur = blur * blur * 0.88f
-            blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.30f) / (0.78f - 0.30f)).coerceIn(0f, 1f)))
+        val focusDepth = Color.red(depthValues[focusYpx * guideWidth + focusXpx]) / 255f
+        val bokeh = createBokehCircles(small, bokehLevel) { x, y ->
+            val gx = min(guideWidth - 1, x * guideWidth / small.width)
+            val gy = min(guideHeight - 1, y * guideHeight / small.height)
+            liveGuideBlurAmount(depthValues[gy * guideWidth + gx], focusDepth)
         }
-        if (sourceSmall !== source) sourceSmall.recycle()
-        return PreviewGuides(depthBitmap, bokeh)
+        if (small !== source) small.recycle()
+        return bokeh
+    }
+
+    private fun liveGuideBlurAmount(sample: Int, focusDepth: Float): Float {
+        val separation = abs(Color.red(sample) / 255f - focusDepth)
+        var blur = smoothstep(((separation - 0.055f) / (0.42f - 0.055f)).coerceIn(0f, 1f))
+        blur = blur * blur * 0.88f
+        return blur * (1f - smoothstep(((Color.green(sample) / 255f - 0.30f) / (0.78f - 0.30f)).coerceIn(0f, 1f)))
     }
 
     private fun applyDepth(
