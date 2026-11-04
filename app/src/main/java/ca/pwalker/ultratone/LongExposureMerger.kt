@@ -87,6 +87,8 @@ internal class LongExposureMerger {
 
     fun frameCount(): Int = frameCount
 
+    fun aspectRatio(): Float? = if (frameCount > 0 && height > 0) width.toFloat() / height else null
+
     private fun decodeUpright(frame: Frame): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(frame.jpegBytes, 0, frame.jpegBytes.size, bounds)
