@@ -27,10 +27,6 @@ object ReferenceRenderer {
         val amount = strength.coerceIn(0f, 1f)
         val width = source.width
         val height = source.height
-        val input = IntArray(width)
-        val upper = IntArray(width)
-        val lower = IntArray(width)
-        val outputRow = IntArray(width)
         val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val detailScale = 0.035f + ((zoomRatio - 1f) / 4f).coerceIn(0f, 1f) * 0.025f
         val night = if (mode == Mode.NIGHT) 1f else 0f
@@ -38,16 +34,25 @@ object ReferenceRenderer {
         val haloX = max(1, width / 150)
         val haloY = max(1, height / 150)
         val needHaloRows = effects.glow
+        val rowsPerBatch = 128
+        val readHalo = if (needHaloRows) haloY else 0
+        val inputBatch = IntArray(width * (rowsPerBatch + readHalo * 2))
+        val outputBatch = IntArray(width * rowsPerBatch)
 
-        for (y in 0 until height) {
-            source.getPixels(input, 0, width, 0, y, width, 1)
-            if (needHaloRows) {
-                source.getPixels(upper, 0, width, 0, (y - haloY).coerceAtLeast(0), width, 1)
-                source.getPixels(lower, 0, width, 0, (y + haloY).coerceAtMost(height - 1), width, 1)
-            }
-            val v = if (height <= 1) 0f else (y.toFloat() / (height - 1) - 0.5f) * 2f
-            for (x in 0 until width) {
-                val pixel = input[x]
+        for (batchStart in 0 until height step rowsPerBatch) {
+            val batchRows = min(rowsPerBatch, height - batchStart)
+            val readTop = (batchStart - readHalo).coerceAtLeast(0)
+            val readBottom = (batchStart + batchRows - 1 + readHalo).coerceAtMost(height - 1)
+            val readRows = readBottom - readTop + 1
+            source.getPixels(inputBatch, 0, width, 0, readTop, width, readRows)
+            for (y in batchStart until batchStart + batchRows) {
+                val inputRow = (y - readTop) * width
+                val upperRow = ((y - haloY).coerceIn(0, height - 1) - readTop) * width
+                val lowerRow = ((y + haloY).coerceIn(0, height - 1) - readTop) * width
+                val outputRow = (y - batchStart) * width
+                val v = if (height <= 1) 0f else (y.toFloat() / (height - 1) - 0.5f) * 2f
+                for (x in 0 until width) {
+                val pixel = inputBatch[inputRow + x]
                 val alpha = pixel ushr 24 and 0xff
                 val r = (pixel ushr 16 and 0xff) / 255f
                 val g = (pixel ushr 8 and 0xff) / 255f
@@ -97,11 +102,11 @@ object ReferenceRenderer {
                 }
 
                 if (effects.glow) {
-                    val left = input[(x - haloX).coerceAtLeast(0)]
-                    val right = input[(x + haloX).coerceAtMost(width - 1)]
+                    val left = inputBatch[inputRow + (x - haloX).coerceIn(0, width - 1)]
+                    val right = inputBatch[inputRow + (x + haloX).coerceIn(0, width - 1)]
                     val glowSource = max(
-                        lumaOf(upper[x]),
-                        max(lumaOf(lower[x]), max(lumaOf(left), lumaOf(right)))
+                        lumaOf(inputBatch[upperRow + x]),
+                        max(lumaOf(inputBatch[lowerRow + x]), max(lumaOf(left), lumaOf(right)))
                     )
                     if (effects.glow) {
                         val bloom = smoothstep(0.68f, 0.97f, glowSource) * 0.075f
@@ -121,9 +126,10 @@ object ReferenceRenderer {
                     nb *= scale
                 }
 
-                outputRow[x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
+                outputBatch[outputRow + x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
+                }
             }
-            output.setPixels(outputRow, 0, width, 0, y, width, 1)
+            output.setPixels(outputBatch, 0, width, 0, batchStart, width, batchRows)
         }
         return output
     }
