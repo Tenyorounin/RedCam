@@ -412,7 +412,7 @@ class MainActivity : ComponentActivity() {
         bokehButton = pill("") { cycleBokeh() }.apply {
             textSize = 12f
             maxLines = 1
-            contentDescription = "Bokeh strength for Close-up mode, Normal"
+            contentDescription = "Bokeh strength, Normal"
         }
         updateBokehButton()
 
@@ -807,7 +807,7 @@ class MainActivity : ComponentActivity() {
         infinityFocusButton.alpha = if (infinityFocusSupported) 1f else 0.45f
         infinityFocusButton.setTextColor(if (infinityFocusEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
         infinityFocusButton.contentDescription = if (infinityFocusEnabled)
-            "Infinity focus enabled; tap to restore autofocus. Close-up blur is disabled."
+            "Infinity focus enabled; tap to restore autofocus. Bokeh blur is disabled."
         else "Autofocus enabled; tap to lock focus at infinity and disable blur."
     }
 
@@ -1401,7 +1401,7 @@ class MainActivity : ComponentActivity() {
         bokehButton.text = "Bokeh: $label"
         bokehButton.setTypeface(null, if (bokehLevel == 0) android.graphics.Typeface.NORMAL else android.graphics.Typeface.BOLD)
         bokehButton.setTextColor(if (bokehLevel == 0) 0xfff2f2f4.toInt() else 0xffffd28c.toInt())
-        bokehButton.contentDescription = "Bokeh strength for Close-up mode, $label. Tap to cycle."
+        bokehButton.contentDescription = "Bokeh strength, $label. Tap to cycle."
     }
 
     private fun bokehLabel(level: Int) = when (level.coerceIn(0, 2)) {
@@ -1971,7 +1971,7 @@ class MainActivity : ComponentActivity() {
                 refreshShutterAvailability()
                 updateThumbnail(rendered)
                 message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
-                    "Saved; close-up blur could not detect usable depth or a person" else if (pendingPhotoCount > 0)
+                    "Saved; Bokeh blur could not detect usable depth or a person" else if (pendingPhotoCount > 0)
                     "Photo saved; processing the next photo" else "Photo saved to Pictures/UltraTone")
                 rendered.recycle()
                 updateStatus()
@@ -2185,7 +2185,7 @@ class MainActivity : ComponentActivity() {
     private fun modeName(mode: ReferenceRenderer.Mode) = when (mode) {
         ReferenceRenderer.Mode.DAY -> "Day"
         ReferenceRenderer.Mode.NIGHT -> "Night"
-        ReferenceRenderer.Mode.CLOSE_UP -> "Close-up"
+        ReferenceRenderer.Mode.CLOSE_UP -> "Bokeh"
         ReferenceRenderer.Mode.SUNSET -> "Sunset"
         ReferenceRenderer.Mode.LONG_EXPOSURE -> "Long exp."
         ReferenceRenderer.Mode.LANDSCAPE -> "Landscape"

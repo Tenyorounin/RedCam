@@ -526,7 +526,7 @@ object PortraitBlur {
     }
 
     private fun defocusAmount(relative: Float, focus: Float): Float {
-        // Inverse depth is higher for near objects. Close-up mode deliberately
+        // Inverse depth is higher for near objects. Bokeh mode deliberately
         // defocuses only the scene behind the selected, near focus plane.
         val separation = (focus - relative).coerceAtLeast(0f)
         val ramp = smoothstep(((separation - 0.12f) / (0.50f - 0.12f)).coerceIn(0f, 1f))
