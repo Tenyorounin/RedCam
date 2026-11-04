@@ -1644,7 +1644,7 @@ class MainActivity : ComponentActivity() {
         releaseCaptureAndApplyPendingRebind()
         refreshShutterAvailability()
         showPolaroidFeedback()
-        setStatusMessage("Merging $frames long exposure frames…")
+        setStatusMessage(if (frames == 1) "Saving one usable frame…" else "Merging $frames aligned frames…")
         photoProcessingExecutor.execute {
             try {
                 val merged = accumulator.finish()

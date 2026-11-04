@@ -3,13 +3,13 @@ package ca.pwalker.ultratone
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import kotlin.math.abs
-import kotlin.math.max
+import kotlin.math.roundToInt
 
 /** Builds a long exposure from normally metered frames so static highlights do not accumulate. */
 internal class LongExposureMerger {
     data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
 
+    private var reference: FrameAlignment? = null
     private var width = 0
     private var height = 0
     private var frameCount = 0
@@ -27,6 +27,7 @@ internal class LongExposureMerger {
             if (averagePixels == null) {
                 width = w
                 height = h
+                reference = FrameAlignment(pixels, w, h)
                 averagePixels = pixels
                 brightestPixels = pixels.copyOf()
                 brightestLuma = ByteArray(pixels.size) { luma(pixels[it]).toByte() }
@@ -38,18 +39,19 @@ internal class LongExposureMerger {
             val average = averagePixels!!
             val brightest = brightestPixels!!
             val peak = brightestLuma!!
-            val (dx, dy) = estimateShift(average, pixels)
+            val transform = reference!!.transformTo(FrameAlignment(pixels, w, h)) ?: return
+            val (cosine, sine, tx, ty) = transform
             val nextCount = frameCount + 1
             for (y in 0 until height) {
-                val sourceY = y + dy
-                if (sourceY !in 0 until height) continue
                 val targetRow = y * width
-                val sourceRow = sourceY * width
+                val startX = tx - sine * y
+                val startY = ty + cosine * y
                 for (x in 0 until width) {
-                    val sourceX = x + dx
-                    if (sourceX !in 0 until width) continue
+                    val sx = (startX + cosine * x).roundToInt()
+                    val sy = (startY + sine * x).roundToInt()
+                    if (sx !in 0 until width || sy !in 0 until height) continue
                     val index = targetRow + x
-                    val sample = pixels[sourceRow + sourceX]
+                    val sample = pixels[sy * width + sx]
                     val current = average[index]
                     average[index] = runningAverage(current, sample, nextCount)
                     val sampleLuma = luma(sample)
@@ -101,56 +103,6 @@ internal class LongExposureMerger {
         if (rotation == 0) return decoded
         return Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height,
             Matrix().apply { postRotate(rotation.toFloat()) }, true).also { if (it !== decoded) decoded.recycle() }
-    }
-
-    /** Small global translation alignment counters hand movement without blurring the whole frame. */
-    private fun estimateShift(reference: IntArray, sample: IntArray): Pair<Int, Int> {
-        val scale = max(1, max(width, height) / 240)
-        val smallWidth = max(1, width / scale)
-        val smallHeight = max(1, height / scale)
-        val radius = max(1, 3 / scale + 1)
-        val left = smallWidth / 8
-        val right = smallWidth * 7 / 8
-        val top = smallHeight / 8
-        val bottom = smallHeight * 7 / 8
-        var bestDx = 0
-        var bestDy = 0
-        var bestCost = Double.POSITIVE_INFINITY
-        for (dy in -radius..radius) for (dx in -radius..radius) {
-            var cost = 0L
-            var count = 0
-            var y = top
-            while (y < bottom) {
-                val ry = y * scale
-                val sy = y + dy
-                if (sy in 0 until smallHeight) {
-                    var x = left
-                    while (x < right) {
-                        val sx = x + dx
-                        if (sx in 0 until smallWidth) {
-                            val a = reference[ry * width + x * scale]
-                            val b = sample[sy * scale * width + sx * scale]
-                            val la = luma(a)
-                            if (la in 18..238) {
-                                cost += abs(la - luma(b))
-                                count++
-                            }
-                        }
-                        x += 3
-                    }
-                }
-                y += 3
-            }
-            if (count >= 24) {
-                val normalized = cost.toDouble() / count
-                if (normalized < bestCost) {
-                    bestCost = normalized
-                    bestDx = dx * scale
-                    bestDy = dy * scale
-                }
-            }
-        }
-        return bestDx to bestDy
     }
 
     private fun runningAverage(a: Int, b: Int, count: Int): Int {
