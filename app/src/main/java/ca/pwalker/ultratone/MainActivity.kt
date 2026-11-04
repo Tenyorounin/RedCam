@@ -133,6 +133,7 @@ class MainActivity : ComponentActivity() {
     private var lastLiveDepthGuideNanos = 0L
     private var lastLiveDepthFocusX = Float.NaN
     private var lastLiveDepthFocusY = Float.NaN
+    private val liveDepthRefreshIntervalNanos = 200_000_000L
     private var previewCooldownUntilNanos = 0L
     private var livePreviewAvailable = false
     @Volatile private var focusX = 0.5f
@@ -1080,12 +1081,20 @@ class MainActivity : ComponentActivity() {
         val focusMoved = lastLiveDepthFocusX.isNaN() || lastLiveDepthFocusY.isNaN() ||
             kotlin.math.abs(focusX - lastLiveDepthFocusX) > 0.01f ||
             kotlin.math.abs(focusY - lastLiveDepthFocusY) > 0.01f
-        val refreshLiveDepth = effect != null && (now - lastLiveDepthGuideNanos >= 500_000_000L || focusMoved)
+        val refreshLiveDepth = effect != null &&
+            (now - lastLiveDepthGuideNanos >= liveDepthRefreshIntervalNanos || focusMoved)
         if (effect != null && !refreshLiveDepth) {
             // The live GPU shader consumes the camera's current frame directly.
             // Only the depth/focus guide needs periodic CPU inference.
             proxy.close()
             return
+        }
+        if (refreshLiveDepth) {
+            // Schedule from inference start, not completion, so model latency does
+            // not get added again to the next refresh interval.
+            lastLiveDepthGuideNanos = now
+            lastLiveDepthFocusX = focusX
+            lastLiveDepthFocusY = focusY
         }
         try {
             val plane = proxy.planes.firstOrNull() ?: return
@@ -1131,11 +1140,6 @@ class MainActivity : ComponentActivity() {
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
                 val guides = processor.createDepthGuide(oriented, focus.first, focus.second)
-                if (refreshLiveDepth) {
-                    lastLiveDepthGuideNanos = System.nanoTime()
-                    lastLiveDepthFocusX = focusX
-                    lastLiveDepthFocusY = focusY
-                }
                 oriented.recycle()
                 if (guides != null) {
                     runOnUiThread {
@@ -1192,7 +1196,7 @@ class MainActivity : ComponentActivity() {
             // If CPU rendering is already missing its target interval, give the
             // camera and UI threads time between frames instead of running the
             // analysis executor continuously at full load.
-            if (processingNanos > minimumInterval * 3 / 5) {
+            if (effect == null && processingNanos > minimumInterval * 3 / 5) {
                 val restNanos = (processingNanos / 2).coerceIn(100_000_000L, 450_000_000L)
                 previewCooldownUntilNanos = System.nanoTime() + restNanos
             }
