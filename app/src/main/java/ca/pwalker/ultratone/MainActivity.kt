@@ -935,6 +935,7 @@ class MainActivity : ComponentActivity() {
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setCaptureMode(mode)
                     .setFlashMode(if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) ImageCapture.FLASH_MODE_OFF else flashMode)
+                if (activeMode == ReferenceRenderer.Mode.DAY) builder.setJpegQuality(100)
                 return builder.build()
             }
             fun newAnalysis() = ImageAnalysis.Builder()
@@ -965,10 +966,10 @@ class MainActivity : ComponentActivity() {
 
             if (camera == null) {
                 val basePreview = newPreview()
-                // Keep normal captures at max quality. The software night burst
+                // Prioritize response in Day mode. The software night burst
                 // uses ZSL when flash is off; CameraX falls back if unsupported.
                 val baseCaptureMode = when {
-                    activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                    activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     activeMode != ReferenceRenderer.Mode.NIGHT -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                     flashMode == ImageCapture.FLASH_MODE_OFF -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
                     else -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -1706,6 +1707,8 @@ class MainActivity : ComponentActivity() {
         if (activeMode == ReferenceRenderer.Mode.NIGHT) {
             setNightCaptureActive(true)
             if (!nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) setNightCaptureProgress(1, 2)
+        } else if (activeMode == ReferenceRenderer.Mode.DAY) {
+            showPolaroidFeedback()
         } else setStatusMessage("Taking photo…")
         val zoom = currentZoomRatio
         val focusXAtCapture = focusX
@@ -1758,7 +1761,7 @@ class MainActivity : ComponentActivity() {
 
         if (detailMergeAtCapture) {
             setStatusMessage("Capturing photo stack frames…")
-            captureNightFrames(capture, mutableListOf(), 0) { frames ->
+            captureNightFrames(capture, mutableListOf(), 0, showFeedbackOnCompletion = modeAtCapture != ReferenceRenderer.Mode.DAY) { frames ->
                 if (frames == null) {
                     runOnUiThread {
                         releaseCaptureAndApplyPendingRebind()
@@ -1798,13 +1801,13 @@ class MainActivity : ComponentActivity() {
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureStarted() {
                 runOnUiThread {
-                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo…")
+                    if (modeAtCapture != ReferenceRenderer.Mode.DAY && modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo…")
                 }
             }
 
             override fun onCaptureProcessProgressed(progress: Int) {
                 runOnUiThread {
-                    if (modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo · $progress%")
+                    if (modeAtCapture != ReferenceRenderer.Mode.DAY && modeAtCapture != ReferenceRenderer.Mode.NIGHT && modeAtCapture != ReferenceRenderer.Mode.LONG_EXPOSURE) setStatusMessage("Taking photo · $progress%")
                 }
             }
 
@@ -1827,7 +1830,7 @@ class MainActivity : ComponentActivity() {
                 }
                 val rotation = image.imageInfo.rotationDegrees
                 image.close()
-                runOnUiThread { showPolaroidFeedback() }
+                if (modeAtCapture != ReferenceRenderer.Mode.DAY) runOnUiThread { showPolaroidFeedback() }
                 runOnUiThread {
                     releaseCaptureAndApplyPendingRebind()
                     setNightCaptureActive(false)
@@ -1930,10 +1933,11 @@ class MainActivity : ComponentActivity() {
         frames: MutableList<NightBurstMerger.Frame>,
         index: Int,
         totalFrames: Int = 2,
+        showFeedbackOnCompletion: Boolean = true,
         onComplete: (List<NightBurstMerger.Frame>?) -> Unit
     ) {
         if (index >= totalFrames) {
-            runOnUiThread { showPolaroidFeedback() }
+            if (showFeedbackOnCompletion) runOnUiThread { showPolaroidFeedback() }
             onComplete(frames.toList())
             return
         }
@@ -1957,7 +1961,7 @@ class MainActivity : ComponentActivity() {
                     if (index + 1 < totalFrames) {
                         runOnUiThread { setNightCaptureProgress(index + 2, totalFrames) }
                     }
-                    captureNightFrames(capture, frames, index + 1, totalFrames, onComplete)
+                    captureNightFrames(capture, frames, index + 1, totalFrames, showFeedbackOnCompletion, onComplete)
                 }
                 override fun onError(error: ImageCaptureException) { onComplete(null) }
             })
