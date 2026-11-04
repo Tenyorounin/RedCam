@@ -31,6 +31,40 @@ object PortraitBlur {
         val focusDepth: Float,
     )
 
+    internal data class StackGuide(
+        val depth: RelativeDepthEstimator.DepthMap?,
+        val person: com.google.mlkit.vision.segmentation.SegmentationMask?,
+        val weights: ByteArray
+    )
+
+    internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>): StackGuide {
+        val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
+            ?: return StackGuide(null, null, ByteArray(0))
+        val segmenter = Segmentation.getClient(
+            SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
+        )
+        val person = try { Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS) }
+            catch (_: Exception) { null } finally { segmenter.close() }
+        val (low, high) = depthRange(depth.values)
+        val span = (high - low).coerceAtLeast(0.035f)
+        val focused = ((focusDepthAt(depth, focus.first, focus.second) - low) / span).coerceIn(0f, 1f)
+        val mask = person?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()
+        val weights = ByteArray(depth.values.size) { i ->
+            var blur = defocusAmount(((depth.values[i] - low) / span).coerceIn(0f, 1f), focused)
+            if (person != null && mask != null) {
+                val x = i % depth.width * person.width / depth.width
+                val y = i / depth.width * person.height / depth.height
+                blur *= 1f - smoothstep(((mask[y * person.width + x] - 0.12f) / 0.36f).coerceIn(0f, 1f))
+            }
+            ((1f - smoothstep((blur / 0.04f).coerceIn(0f, 1f))) * 255f).roundToInt().toByte()
+        }
+        return StackGuide(depth, person, weights)
+    }
+
+    internal fun applyStack(source: Bitmap, guide: StackGuide, focus: Pair<Float, Float>, level: Int): Result =
+        guide.depth?.let { applyDepth(source, guide.person, it, focus.first, focus.second, level) }
+            ?: Result(source, false, false)
+
     fun apply(context: Context, source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result {
         val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
@@ -180,6 +214,19 @@ object PortraitBlur {
         return samples[samples.size / 2]
     }
 
+    private fun focusDepthAt(depth: RelativeDepthEstimator.DepthMap, focusX: Float, focusY: Float): Float {
+        val sampleX = (focusX.coerceIn(0f, 1f) * (depth.width - 1)).toInt()
+        val sampleY = (focusY.coerceIn(0f, 1f) * (depth.height - 1)).toInt()
+        val focusSamples = ArrayList<Float>(81)
+        for (dy in -4..4) for (dx in -4..4) {
+            val x = (sampleX + dx).coerceIn(0, depth.width - 1)
+            val y = (sampleY + dy).coerceIn(0, depth.height - 1)
+            focusSamples += depth.values[y * depth.width + x]
+        }
+        focusSamples.sort()
+        return focusSamples[focusSamples.size / 2]
+    }
+
     private fun applyDepth(
         source: Bitmap,
         mask: com.google.mlkit.vision.segmentation.SegmentationMask?,
@@ -190,16 +237,7 @@ object PortraitBlur {
     ): Result {
         val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
-        val sampleX = (focusX.coerceIn(0f, 1f) * (depth.width - 1)).toInt()
-        val sampleY = (focusY.coerceIn(0f, 1f) * (depth.height - 1)).toInt()
-        val focusSamples = ArrayList<Float>(81)
-        for (dy in -4..4) for (dx in -4..4) {
-            val x = (sampleX + dx).coerceIn(0, depth.width - 1)
-            val y = (sampleY + dy).coerceIn(0, depth.height - 1)
-            focusSamples += depth.values[y * depth.width + x]
-        }
-        focusSamples.sort()
-        val focusDepth = focusSamples[focusSamples.size / 2]
+        val focusDepth = focusDepthAt(depth, focusX, focusY)
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
         val confidence = mask?.buffer?.order(ByteOrder.nativeOrder())?.asFloatBuffer()?.apply { position(0) }

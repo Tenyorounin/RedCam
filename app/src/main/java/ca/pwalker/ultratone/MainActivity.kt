@@ -546,6 +546,16 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        bottomPanel.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+            if (resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+                val lp = moreMenuPanel.layoutParams as? FrameLayout.LayoutParams
+                val margin = bottom - top + dp(24)
+                if (lp != null && lp.bottomMargin != margin) {
+                    lp.bottomMargin = margin
+                    moreMenuPanel.layoutParams = lp
+                }
+            }
+        }
         overlay.addView(moreMenuPanel)
         longExposureHint = TextView(this).apply {
             textSize = 24f
@@ -606,12 +616,13 @@ class MainActivity : ComponentActivity() {
             moreMenuPanel.layoutParams = if (landscape) {
                 FrameLayout.LayoutParams(dp(250), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START or Gravity.CENTER_VERTICAL).apply {
                     marginStart = dp(72)
+                    bottomMargin = dp(20)
                 }
             } else {
                 FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
                     leftMargin = dp(12)
                     rightMargin = dp(12)
-                    bottomMargin = dp(124)
+                    bottomMargin = bottomPanel.height.takeIf { landscapeControlsActive == false && it > 0 }?.plus(dp(24)) ?: dp(164)
                 }
             }
         }
@@ -1293,6 +1304,7 @@ class MainActivity : ComponentActivity() {
         if (longExposureHoldActive) return
         activeMode = mode
         updateFlashButtonAvailability()
+        updateDetailMergeButton()
         updateLiveLook()
         if (mode != ReferenceRenderer.Mode.CLOSE_UP) {
             analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
@@ -1439,6 +1451,16 @@ class MainActivity : ComponentActivity() {
     private fun updateDetailMergeButton() {
         if (!::detailMergeButton.isInitialized) return
         val state = if (multiFrameDetailEnabled) "On" else "Off"
+        val available = activeMode != ReferenceRenderer.Mode.LONG_EXPOSURE
+        detailMergeButton.isEnabled = available
+        detailMergeButton.isClickable = available
+        if (!available) {
+            detailMergeButton.text = "Photo stack: unavailable"
+            detailMergeButton.setTextColor(0xff888888.toInt())
+            detailMergeButton.setTypeface(null, android.graphics.Typeface.NORMAL)
+            detailMergeButton.contentDescription = "Photo stack unavailable in Long Exposure"
+            return
+        }
         detailMergeButton.text = "Photo stack: $state"
         detailMergeButton.setTextColor(if (multiFrameDetailEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
         detailMergeButton.setTypeface(null, if (multiFrameDetailEnabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
@@ -1835,9 +1857,19 @@ class MainActivity : ComponentActivity() {
                     }
                     enqueuePhoto {
                         try {
-                            val merged = timed("stack merge") { NightBurstMerger.mergeDetail(frames) }
+                            var guide: PortraitBlur.StackGuide? = null
+                            val merged = timed("stack merge") {
+                                if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) {
+                                    fun focusAt(w: Int, h: Int) = mapFocusToFrame(focusXAtCapture, focusYAtCapture,
+                                        previewSize.width, previewSize.height, w, h, facingAtCapture == CameraSelector.LENS_FACING_FRONT)
+                                    NightBurstMerger.mergeDetail(frames, ::focusAt) { base ->
+                                        PortraitBlur.prepareStack(this@MainActivity, base, focusAt(base.width, base.height))
+                                            .also { guide = it }
+                                    }
+                                } else NightBurstMerger.mergeDetail(frames)
+                            }
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
-                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(frames.first().jpegBytes))
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(frames.first().jpegBytes), guide)
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -2050,7 +2082,8 @@ class MainActivity : ComponentActivity() {
         effectsAtCapture: ReferenceRenderer.Effects = ReferenceRenderer.Effects(),
         bokehLevelAtCapture: Int = 0,
         previewSize: Size,
-        exif: Map<String, String>
+        exif: Map<String, String>,
+        stackGuide: PortraitBlur.StackGuide? = null
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -2066,7 +2099,10 @@ class MainActivity : ComponentActivity() {
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
             val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
-                timed("bokeh") { PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture) }
+                timed("bokeh") {
+                    if (stackGuide != null) PortraitBlur.applyStack(styled, stackGuide, focus, bokehLevelAtCapture)
+                    else PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture)
+                }
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
