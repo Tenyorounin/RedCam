@@ -73,7 +73,7 @@ import kotlin.math.sqrt
 class MainActivity : ComponentActivity() {
     private companion object {
         const val MAX_LONG_EXPOSURE_MILLIS = 30_000L
-        const val LONG_EXPOSURE_TICK_MILLIS = 200L
+        const val LONG_EXPOSURE_TICK_MILLIS = 100L
     }
 
     private lateinit var previewView: PreviewView
@@ -200,7 +200,7 @@ class MainActivity : ComponentActivity() {
                 finishLongExposureHold(limitReached = true)
                 return
             }
-            setStatusMessage("Long exposure · ${"%.1f".format(elapsed / 1000f)} s · $longExposureFrameCount frames")
+            updateLongExposureHint()
             longExposureHandler.postDelayed(this, LONG_EXPOSURE_TICK_MILLIS)
         }
     }
@@ -545,17 +545,14 @@ class MainActivity : ComponentActivity() {
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         overlay.addView(moreMenuPanel)
         longExposureHint = TextView(this).apply {
-            text = "Press and hold"
-            textSize = 16f
+            textSize = 24f
             gravity = Gravity.CENTER
-            setTextColor(Color.WHITE)
-            setPadding(dp(18), dp(10), dp(18), dp(10))
-            background = roundedStroke(0xb3111216.toInt(), 0x99ffffff.toInt(), 1, 18)
+            setTextColor(0xcfffffff.toInt())
+            setShadowLayer(dp(3).toFloat(), 0f, dp(1).toFloat(), Color.BLACK)
             visibility = View.GONE
             isClickable = false
             isFocusable = false
             elevation = dp(7).toFloat()
-            contentDescription = "Long exposure mode. Press and hold the shutter to take a longer exposure."
         }
         overlay.addView(longExposureHint, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER
@@ -1418,10 +1415,14 @@ class MainActivity : ComponentActivity() {
 
     private fun updateLongExposureHint() {
         if (!::longExposureHint.isInitialized) return
-        longExposureHint.visibility = if (
-            previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE &&
-            !longExposureHoldActive && !isBusy && pendingPhotoCount == 0
-        ) View.VISIBLE else View.GONE
+        val visible = previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE
+        longExposureHint.visibility = if (visible) View.VISIBLE else View.GONE
+        if (visible) {
+            longExposureHint.text = if (longExposureHoldActive) {
+                val elapsed = SystemClock.elapsedRealtime() - longExposureStartedAtMs
+                "%.1f s".format(elapsed.coerceIn(0L, MAX_LONG_EXPOSURE_MILLIS) / 1000.0)
+            } else "press and hold"
+        }
     }
 
     private fun toggleNightEnhancement() {
@@ -1534,7 +1535,6 @@ class MainActivity : ComponentActivity() {
         isBusy = true
         pendingPhotoCount++
         updateLongExposureHint()
-        setStatusMessage("Long exposure · 0.0 s · hold shutter")
         longExposureHandler.removeCallbacks(longExposureTicker)
         longExposureHandler.postDelayed(longExposureTicker, LONG_EXPOSURE_TICK_MILLIS)
         captureLongExposureFrame()
@@ -1618,6 +1618,7 @@ class MainActivity : ComponentActivity() {
     private fun finishLongExposureHold(limitReached: Boolean = false) {
         if (!longExposureHoldActive) return
         longExposureHoldActive = false
+        updateLongExposureHint()
         longExposureHandler.removeCallbacks(longExposureTicker)
         val elapsed = (SystemClock.elapsedRealtime() - longExposureStartedAtMs).coerceAtLeast(0L)
         setStatusMessage("Processing long exposure · ${"%.1f".format(elapsed / 1000f)} s · $longExposureFrameCount frames")
@@ -1664,6 +1665,7 @@ class MainActivity : ComponentActivity() {
 
     private fun stopLongExposureAfterCaptureError(messageText: String) {
         longExposureHoldActive = false
+        updateLongExposureHint()
         longExposureHandler.removeCallbacks(longExposureTicker)
         if (longExposureFrameProcessing || longExposureFrameCaptureInFlight) {
             message(messageText)
