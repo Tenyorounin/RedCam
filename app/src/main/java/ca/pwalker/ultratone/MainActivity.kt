@@ -1192,7 +1192,7 @@ class MainActivity : ComponentActivity() {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
                             android.util.Log.d("UltraToneTiming", "guide processing to display ${(System.nanoTime() - now) / 1_000_000} ms")
-                            effect.updateDepthGuide(guides.depth, guides.circles, guides.focusDepth, guides.focusOnPerson)
+                            effect.updateDepthGuide(guides.depth, guides.circles, guides.focusDepth)
                         } else {
                             guides.depth.recycle()
                             guides.circles.recycle()
