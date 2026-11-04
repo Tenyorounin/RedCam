@@ -18,12 +18,7 @@ object NightBurstMerger {
     private const val MAX_LUMA_DELTA = 24
     private const val MAX_RGB_DELTA = 72
 
-    data class Frame(
-        val jpegBytes: ByteArray,
-        val rotationDegrees: Int,
-        val width: Int = 0,
-        val height: Int = 0
-    )
+    data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
 
     /**
      * Two-frame photo stack for the optional deblur mode. Start with whichever

@@ -718,12 +718,20 @@ class MainActivity : ComponentActivity() {
 
     private fun previewContentAspectRatio(): Float {
         val info = previewUseCase?.resolutionInfo
-        if (info != null) {
+        val aspect = if (info != null) {
             val width = info.resolution.width.toFloat().coerceAtLeast(1f)
             val height = info.resolution.height.toFloat().coerceAtLeast(1f)
-            return if (info.rotationDegrees == 90 || info.rotationDegrees == 270) height / width else width / height
-        }
-        return if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) 4f / 3f else 3f / 4f
+            if (info.rotationDegrees == 90 || info.rotationDegrees == 270) height / width else width / height
+        } else if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            4f / 3f
+        } else 3f / 4f
+        // CameraX can report the stream in sensor orientation even after the
+        // display has rotated. Keep the fitted image shape consistent with the
+        // visible preview orientation used by PreviewView.
+        val landscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        return if (landscape && aspect < 1f) 1f / aspect
+        else if (!landscape && aspect > 1f) 1f / aspect
+        else aspect
     }
 
     private fun fitCenterContentRect(width: Int, height: Int, aspect: Float): RectF? {
@@ -1604,7 +1612,7 @@ class MainActivity : ComponentActivity() {
         longExposureFrameCount = 0
         releaseCaptureAndApplyPendingRebind()
         refreshShutterAvailability()
-        showPolaroidFeedback(accumulator.aspectRatio())
+        showPolaroidFeedback()
         setStatusMessage("Merging $frames long exposure frames…")
         photoProcessingExecutor.execute {
             try {
@@ -1784,9 +1792,8 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 val rotation = image.imageInfo.rotationDegrees
-                val photoAspectRatio = orientedAspectRatio(image.width, image.height, rotation)
                 image.close()
-                runOnUiThread { showPolaroidFeedback(photoAspectRatio) }
+                runOnUiThread { showPolaroidFeedback() }
                 runOnUiThread {
                     releaseCaptureAndApplyPendingRebind()
                     setNightCaptureActive(false)
@@ -1828,7 +1835,7 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    private fun showPolaroidFeedback(photoAspectRatio: Float? = null) {
+    private fun showPolaroidFeedback() {
         if (!::photoFeedbackLayer.isInitialized || photoFeedbackLayer.width == 0) return
         val activePreview = when {
             processedPreviewView.visibility == View.VISIBLE -> processedPreviewView
@@ -1839,7 +1846,7 @@ class MainActivity : ComponentActivity() {
             private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
             override fun onDraw(canvas: Canvas) {
                 super.onDraw(canvas)
-                val aspect = photoAspectRatio ?: if (activePreview === processedPreviewView) {
+                val aspect = if (activePreview === processedPreviewView) {
                     processedPreviewBitmap?.let { it.width.toFloat() / it.height.coerceAtLeast(1) }
                         ?: previewContentAspectRatio()
                 } else previewContentAspectRatio()
@@ -1892,10 +1899,7 @@ class MainActivity : ComponentActivity() {
         onComplete: (List<NightBurstMerger.Frame>?) -> Unit
     ) {
         if (index >= totalFrames) {
-            val aspect = frames.firstOrNull()?.let {
-                orientedAspectRatio(it.width, it.height, it.rotationDegrees)
-            }
-            runOnUiThread { showPolaroidFeedback(aspect) }
+            runOnUiThread { showPolaroidFeedback() }
             onComplete(frames.toList())
             return
         }
@@ -1908,9 +1912,7 @@ class MainActivity : ComponentActivity() {
                             ?: error("Night capture returned no image data")
                         val jpeg = ByteArray(buffer.remaining())
                         buffer.get(jpeg)
-                        nextFrame = NightBurstMerger.Frame(
-                            jpeg, image.imageInfo.rotationDegrees, image.width, image.height
-                        )
+                        nextFrame = NightBurstMerger.Frame(jpeg, image.imageInfo.rotationDegrees)
                     } catch (_: Exception) { }
                     image.close()
                     if (nextFrame == null) {
@@ -2108,11 +2110,6 @@ class MainActivity : ComponentActivity() {
         var sample = 1
         while (width / sample.toLong() * (height / sample.toLong()) > 16_000_000L) sample *= 2
         return BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.ARGB_8888 }
-    }
-
-    private fun orientedAspectRatio(width: Int, height: Int, rotationDegrees: Int): Float? {
-        if (width <= 0 || height <= 0) return null
-        return if (rotationDegrees % 180 == 0) width.toFloat() / height else height.toFloat() / width
     }
 
     /** Map a tap through PreviewView's FIT_CENTER letterboxing onto the full captured frame. */
