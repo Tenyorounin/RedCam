@@ -27,6 +27,7 @@ object PortraitBlur {
     data class Result(val bitmap: Bitmap, val subjectDetected: Boolean, val usedDepth: Boolean)
     data class PreviewGuides(
         val depth: Bitmap,
+        val circles: Bitmap,
         val focusDepth: Float,
         val focusOnPerson: Boolean
     )
@@ -48,8 +49,8 @@ object PortraitBlur {
             PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
 
         /** Builds compact depth and foreground guides for the GPU live preview. */
-        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float): PreviewGuides? {
-            return PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY)
+        fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float, level: Int): PreviewGuides? {
+            return PortraitBlur.createDepthGuide(appContext, source, segmenter, focusX, focusY, level)
         }
 
         override fun close() {
@@ -93,7 +94,8 @@ object PortraitBlur {
         source: Bitmap,
         segmenter: Segmenter,
         focusX: Float,
-        focusY: Float
+        focusY: Float,
+        level: Int
     ): PreviewGuides? {
         val maskTask = try { segmenter.process(InputImage.fromBitmap(source, 0)) } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
@@ -144,7 +146,26 @@ object PortraitBlur {
         }
         val depthBitmap = Bitmap.createBitmap(guide, guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
         val focusDepth = focusDepthAt(guide, guideWidth, guideHeight, focusX, focusY)
-        return PreviewGuides(depthBitmap, focusDepth, focusOnPerson)
+        val small = Bitmap.createScaledBitmap(source, guideWidth, guideHeight, true)
+        val pixels = IntArray(guide.size)
+        small.getPixels(pixels, 0, guideWidth, 0, 0, guideWidth, guideHeight)
+        if (small !== source) small.recycle()
+        val amounts = FloatArray(guide.size) { index ->
+            val point = guide[index]
+            val blur = if (focusOnPerson) 0.88f else defocusAmount(Color.red(point) / 255f, focusDepth)
+            blur * (1f - smoothstep(((Color.green(point) / 255f - 0.12f) / 0.36f).coerceIn(0f, 1f)))
+        }
+        val eligible = BooleanArray(guide.size) { amounts[it] >= 0.16f }
+        val circles = Bitmap.createBitmap(guideWidth, guideHeight, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(circles)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        for (light in findBackgroundHighlights(pixels, guideWidth, guideHeight, amounts, eligible)) {
+            paint.color = light.color
+            paint.alpha = (255f * discOpacity(level) * light.strength).roundToInt()
+            canvas.drawCircle(light.x + 0.5f, light.y + 0.5f,
+                max(1f, blurRadius(level) * guideWidth.coerceAtLeast(guideHeight) / 768f * light.blur * 0.82f), paint)
+        }
+        return PreviewGuides(depthBitmap, circles, focusDepth, focusOnPerson)
     }
 
     private fun focusIsOnPerson(
@@ -275,7 +296,7 @@ object PortraitBlur {
         val input = IntArray(width * height)
         small.getPixels(input, 0, width, 0, 0, width, height)
         if (small !== source) small.recycle()
-        val maxRadius = when (bokehLevel.coerceIn(0, 2)) { 0 -> 5f; 1 -> 10f; else -> 16f }
+        val maxRadius = blurRadius(bokehLevel)
         val blurAmounts = FloatArray(input.size)
         val backgroundEligible = BooleanArray(input.size)
         val offsets = ArrayList<Pair<Float, Float>>(49)
@@ -408,13 +429,16 @@ object PortraitBlur {
                 val strength = (0.25f + 0.75f * peakStrength) * (0.35f + 0.65f * contrastStrength)
                 highlights += Highlight(x, y, sourceColor, strength.coerceIn(0.18f, 1f), blurAmounts[index])
                 for (dy in -5..5) for (dx in -5..5) {
-                    if (dx * dx + dy * dy <= 25) suppressed[(y + dy) * width + x + dx] = true
+                    if (dx * dx + dy * dy <= 25 && x + dx in 0 until width && y + dy in 0 until height) suppressed[(y + dy) * width + x + dx] = true
                 }
                 if (highlights.size >= 96) return highlights
             }
         }
         return highlights
     }
+
+    private fun blurRadius(level: Int) = when (level) { 0 -> 5f; 1 -> 16f; else -> 24f }
+    private fun discOpacity(level: Int) = when (level) { 0 -> 0.34f; 1 -> 0.58f; else -> 0.68f }
 
     private fun renderHighlightDiscs(
         pixels: IntArray,
@@ -426,7 +450,7 @@ object PortraitBlur {
         maxRadius: Float,
         bokehLevel: Int
     ) {
-        val opacity = when (bokehLevel.coerceIn(0, 2)) { 0 -> 0.34f; 1 -> 0.46f; else -> 0.58f }
+        val opacity = discOpacity(bokehLevel)
         for (highlight in highlights) {
             val radius = max(2f, maxRadius * highlight.blur * 0.82f)
             val reach = kotlin.math.ceil(radius.toDouble()).toInt()

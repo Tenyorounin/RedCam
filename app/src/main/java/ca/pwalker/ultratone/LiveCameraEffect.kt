@@ -20,9 +20,10 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     @Volatile private var mode = ReferenceRenderer.Mode.DAY
     private var hasFreshDepthGuide = false
     private var infinityFocus = false
-    private var bokehLevel = 0
+    private var circlesBitmap: Bitmap? = null
     init {
         shader.setInputShader("depthGuide", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        shader.setInputShader("circles", BitmapShader(depthBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
         shader.setFloatUniform("strength", 0.78f)
         shader.setFloatUniform("zoomRatio", 1f)
         shader.setIntUniform("mode", 0)
@@ -39,14 +40,14 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
 
-    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects(), bokehLevel: Int = 0) {
+    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects()) {
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
         }
         this.mode = mode
         this.infinityFocus = infinityFocus
-        this.bokehLevel = bokehLevel.coerceIn(0, 2)
+
         if (infinityFocus) hasFreshDepthGuide = false
         shader.setIntUniform("mode", when (mode) {
             ReferenceRenderer.Mode.DAY -> 0
@@ -72,7 +73,11 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
     }
 
     /** Takes ownership of the depth and foreground guides used by the lens blur. */
-    fun updateDepthGuide(bitmap: Bitmap, focusDepth: Float, focusOnPerson: Boolean) {
+    fun updateDepthGuide(bitmap: Bitmap, circles: Bitmap, focusDepth: Float, focusOnPerson: Boolean) {
+        val oldCircles = circlesBitmap
+        circlesBitmap = circles
+        shader.setInputShader("circles", BitmapShader(circles, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
+        oldCircles?.let { mainHandler.postDelayed({ it.recycle() }, 2000L) }
         val oldDepth = depthBitmap
         depthBitmap = bitmap
         shader.setInputShader("depthGuide", BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP))
@@ -114,7 +119,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         val offsetY = (viewHeight - renderedHeight) / 2f
         val scaleX = guideWidth / renderedWidth.coerceAtLeast(1f)
         val scaleY = guideHeight / renderedHeight.coerceAtLeast(1f)
-        val apertureRadius = when (bokehLevel) { 1 -> 7f; 2 -> 11f; else -> 3.5f }
+        val apertureRadius = 3.5f
         shader.setFloatUniform("bokehRadius", apertureRadius * fitScale)
         shader.setFloatUniform(
             "depthScale",
@@ -132,6 +137,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(null)
         depthBitmap?.let { if (!it.isRecycled) it.recycle() }
         depthBitmap = null
+        circlesBitmap?.recycle()
+        circlesBitmap = null
     }
 
     companion object {
@@ -143,6 +150,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         private val SOURCE = """
             uniform shader cameraImage;
             uniform shader depthGuide;
+            uniform shader circles;
             uniform float strength;
             uniform float zoomRatio;
             uniform int mode;
@@ -240,10 +248,10 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         float radius = blur * bokehRadius;
                         float3 softened = float3(0.0);
                         float weightSum = 0.0;
-                        for (int i = 0; i < 24; i++) {
+                        for (int i = 0; i < 12; i++) {
                                 // Vogel disk: evenly covers a circular aperture without
                                 // the visible lattice from a clipped square grid.
-                                float dist = sqrt((float(i) + 0.5) / 24.0);
+                                float dist = sqrt((float(i) + 0.5) / 12.0);
                                 float angle = float(i) * 2.39996323;
                                 float2 unitOffset = dist * float2(cos(angle), sin(angle));
                                 float2 samplePos = p + unitOffset * radius;
@@ -261,6 +269,8 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                         if (weightSum > 0.001) {
                             softened /= weightSum;
                             rgb = mix(rgb, softened, blur);
+                            float4 light = circles.eval(dp);
+                            rgb = rgb * (1.0 - light.a * blur) + light.rgb * blur;
                         }
                     }
                 }

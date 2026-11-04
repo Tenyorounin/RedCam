@@ -106,7 +106,9 @@ class MainActivity : ComponentActivity() {
     private var landscapeFocusDistance: Float? = null
     private var moreMenuExpanded = false
     private val focusIndicatorHandler = Handler(Looper.getMainLooper())
+    private val focusMotion by lazy { TapFocusMotion(getSystemService(SENSOR_SERVICE) as android.hardware.SensorManager) }
     private val hideFocusIndicator = Runnable {
+        focusMotion.stop()
         if (::focusIndicator.isInitialized) {
             focusIndicator.animate().alpha(0f).setDuration(180L).withEndAction { focusIndicator.visibility = View.GONE }.start()
         }
@@ -162,6 +164,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var nightCaptureIndicator: LinearLayout
     private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
+    private var landscapeModeScroll: android.widget.ScrollView? = null
     private lateinit var finishRow: LinearLayout
     private lateinit var captureControls: LinearLayout
     private lateinit var editControls: LinearLayout
@@ -591,7 +594,7 @@ class MainActivity : ComponentActivity() {
             FrameLayout.LayoutParams(-1, dp(38), Gravity.TOP).apply { topMargin = dp(52) }
         }
         bottomPanel.layoutParams = if (landscape) {
-            FrameLayout.LayoutParams(dp(148), ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+            FrameLayout.LayoutParams(dp(148), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
                 marginEnd = dp(12)
             }
         } else {
@@ -707,15 +710,47 @@ class MainActivity : ComponentActivity() {
         focusX = (previewX / previewView.width.coerceAtLeast(1)).coerceIn(0f, 1f)
         focusY = (previewY / previewView.height.coerceAtLeast(1)).coerceIn(0f, 1f)
         showFocusIndicator(previewX, previewY)
+        watchFocusMotion(contentRect, previewX, previewY)
 
         try {
             val point = previewView.meteringPointFactory.createPoint(previewX, previewY, 0.12f)
             val action = FocusMeteringAction.Builder(point)
-                .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                .setAutoCancelDuration(5, TimeUnit.SECONDS)
                 .build()
             boundCamera?.cameraControl?.startFocusAndMetering(action)
         } catch (_: Exception) { }
         source.performClick()
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun watchFocusMotion(rect: RectF, x: Float, y: Float) {
+        val camera = boundCamera ?: return
+        val info = Camera2CameraInfo.from(camera.cameraInfo)
+        val sensor = info.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE) ?: return
+        val focal = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.firstOrNull()?.takeIf { it > 0f } ?: return
+        val landscape = rect.width() >= rect.height()
+        val longSide = maxOf(sensor.width, sensor.height)
+        val shortSide = minOf(sensor.width, sensor.height)
+        val halfWidth = minOf(if (landscape) longSide else shortSide,
+            (if (landscape) shortSide else longSide) * rect.width() / rect.height()) /
+            (2f * focal * currentZoomRatio)
+        focusMotion.start((x - rect.left) / rect.width(), (y - rect.top) / rect.height(),
+            halfWidth, halfWidth * rect.height() / rect.width(), previewView.display?.rotation ?: 0,
+            lensFacing == CameraSelector.LENS_FACING_FRONT, { nx, ny ->
+                val px = rect.left + nx * rect.width()
+                val py = rect.top + ny * rect.height()
+                focusIndicator.translationX += px - focusX * previewView.width
+                focusIndicator.translationY += py - focusY * previewView.height
+                focusX = px / previewView.width
+                focusY = py / previewView.height
+            }) {
+            camera.cameraControl.cancelFocusAndMetering()
+            focusX = 0.5f
+            focusY = 0.5f
+            focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
+            hideFocusIndicator.run()
+        }
     }
 
     private fun previewContentAspectRatio(): Float {
@@ -878,7 +913,7 @@ class MainActivity : ComponentActivity() {
         focusIndicator.scaleY = 0.82f
         focusIndicator.visibility = View.VISIBLE
         focusIndicator.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(140L).start()
-        focusIndicatorHandler.postDelayed(hideFocusIndicator, 1_100L)
+        focusIndicatorHandler.postDelayed(hideFocusIndicator, 5_000L)
     }
 
     private fun startCamera() {
@@ -898,6 +933,7 @@ class MainActivity : ComponentActivity() {
 
     @OptIn(ExperimentalZeroShutterLag::class, ExperimentalCamera2Interop::class)
     private fun bindCamera() {
+        focusMotion.stop()
         val provider = cameraProvider ?: return
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         zoomObserver = null
@@ -1150,15 +1186,16 @@ class MainActivity : ComponentActivity() {
                     focusX, focusY, previewView.width, previewView.height, oriented.width, oriented.height,
                     lensFacing == CameraSelector.LENS_FACING_FRONT
                 )
-                val guides = processor.createDepthGuide(oriented, focus.first, focus.second)
+                val guides = processor.createDepthGuide(oriented, focus.first, focus.second, bokehLevel)
                 oriented.recycle()
                 if (guides != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
                             android.util.Log.d("UltraToneTiming", "guide processing to display ${(System.nanoTime() - now) / 1_000_000} ms")
-                            effect.updateDepthGuide(guides.depth, guides.focusDepth, guides.focusOnPerson)
+                            effect.updateDepthGuide(guides.depth, guides.circles, guides.focusDepth, guides.focusOnPerson)
                         } else {
-                            if (!guides.depth.isRecycled) guides.depth.recycle()
+                            guides.depth.recycle()
+                            guides.circles.recycle()
                         }
                     }
                 } else {
@@ -1297,7 +1334,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects(), bokehLevel)
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
     }
 
     private fun updateFinishButtons() {
@@ -1340,6 +1377,23 @@ class MainActivity : ComponentActivity() {
         }
 
         if (landscapeControlsActive != landscape) {
+            // Equal upper and lower regions keep the shutter on the screen midline.
+            for (row in listOf(finishRow, modeRow, captureControls))
+                (row.parent as? ViewGroup)?.removeView(row)
+            landscapeModeScroll?.let { bottomPanel.removeView(it) }
+            landscapeModeScroll = null
+            if (landscape) {
+                finishRow.gravity = Gravity.CENTER
+                bottomPanel.addView(finishRow, 0, LinearLayout.LayoutParams(-1, 0, 1f))
+                bottomPanel.addView(captureControls, 1, LinearLayout.LayoutParams(-1, -2))
+                val scroll = android.widget.ScrollView(this).apply { addView(modeRow); isFillViewport = false }
+                landscapeModeScroll = scroll
+                bottomPanel.addView(scroll, 2, LinearLayout.LayoutParams(-1, 0, 1f))
+            } else {
+                listOf(modeRow, finishRow, captureControls).forEachIndexed { index, row ->
+                    bottomPanel.addView(row, index, LinearLayout.LayoutParams(-1, -2))
+                }
+            }
             (thumbnailButton.parent as? ViewGroup)?.removeView(thumbnailButton)
             (moreButton.parent as? ViewGroup)?.removeView(moreButton)
             captureControls.removeAllViews()
@@ -2286,7 +2340,13 @@ class MainActivity : ComponentActivity() {
         super.onPause()
     }
 
+    override fun onStop() {
+        focusMotion.stop()
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
         longExposureHandler.removeCallbacks(longExposureTicker)
         super.onDestroy()
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }

@@ -61,9 +61,34 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
                         values[x * mapHeight + mapHeight - 1 - y] = (buffer.get().toInt() and 255) / 255f
                     }
                 }
-                return DepthMap(mapHeight, mapWidth, values)
+                return DepthMap(mapHeight, mapWidth, refineDarkEdges(values, mapHeight, mapWidth))
             }
         }
+    }
+
+    // Pull uncertain dark boundary pixels toward nearby dark fur on the nearer
+    // side, but only where the image itself has a visible silhouette.
+    private fun refineDarkEdges(depth: FloatArray, width: Int, height: Int): FloatArray {
+        fun brightness(x: Int, y: Int): Int {
+            val c = pixels[(y * INPUT_SIZE / height) * INPUT_SIZE + x * INPUT_SIZE / width]
+            return (54 * Color.red(c) + 183 * Color.green(c) + 19 * Color.blue(c)) shr 8
+        }
+        val result = depth.copyOf()
+        for (y in 2 until height - 2) for (x in 2 until width - 2) {
+            val center = brightness(x, y)
+            if (center > 80) continue
+            val i = y * width + x
+            var nearest = depth[i]
+            var contrast = 0
+            for (dy in -2..2 step 2) for (dx in -2..2 step 2) {
+                val neighbor = brightness(x + dx, y + dy)
+                contrast = maxOf(contrast, neighbor - center)
+                if (kotlin.math.abs(neighbor - center) <= 16)
+                    nearest = maxOf(nearest, depth[i + dy * width + dx])
+            }
+            if (contrast >= 20) result[i] = nearest
+        }
+        return result
     }
 
     override fun close() { session.close() }
