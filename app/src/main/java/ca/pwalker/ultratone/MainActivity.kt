@@ -124,6 +124,7 @@ class MainActivity : ComponentActivity() {
     private var boundCamera: Camera? = null
     private var zoomObserver: Observer<ZoomState>? = null
     private var sourceBitmap: Bitmap? = null
+    private var importedExif = emptyMap<String, String>()
     private var renderedBitmap: Bitmap? = null
     private var lastPhotoUri: Uri? = null
     private var processedPreviewBitmap: Bitmap? = null
@@ -133,7 +134,7 @@ class MainActivity : ComponentActivity() {
     private var lastLiveDepthGuideNanos = 0L
     private var lastLiveDepthFocusX = Float.NaN
     private var lastLiveDepthFocusY = Float.NaN
-    private val liveDepthRefreshIntervalNanos = 200_000_000L
+    private val liveDepthRefreshIntervalNanos = 125_000_000L
     private var previewCooldownUntilNanos = 0L
     private var livePreviewAvailable = false
     @Volatile private var focusX = 0.5f
@@ -177,13 +178,17 @@ class MainActivity : ComponentActivity() {
         val strength: Float,
         val finish: ReferenceRenderer.Finish,
         val infinityFocus: Boolean,
-        val effects: ReferenceRenderer.Effects
+        val effects: ReferenceRenderer.Effects,
+        val previewSize: Size
     )
     private var longExposureHoldActive = false
     private var longExposureFrameCaptureInFlight = false
     private var longExposureFrameProcessing = false
     private var longExposureFinalizing = false
     private var longExposureStartedAtMs = 0L
+    private var previousLongFrameTimestamp = 0L
+    private var waitingLongFrame: LongExposureMerger.Frame? = null
+    private var longExposureExif = emptyMap<String, String>()
     private var longExposureFrameCount = 0
     private var longExposureAccumulator: LongExposureMerger? = null
     private var longExposureContext: LongExposureCaptureContext? = null
@@ -1079,7 +1084,7 @@ class MainActivity : ComponentActivity() {
             proxy.close()
             return
         }
-        val minimumInterval = if (effect != null) 50_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 900_000_000L else 150_000_000L
+        val minimumInterval = if (effect != null) 50_000_000L else if (mode == ReferenceRenderer.Mode.CLOSE_UP) 450_000_000L else 150_000_000L
         if (now - lastPreviewFrameNanos < minimumInterval || now < previewCooldownUntilNanos) {
             proxy.close()
             return
@@ -1152,6 +1157,7 @@ class MainActivity : ComponentActivity() {
                 if (guides != null) {
                     runOnUiThread {
                         if (!isDestroyed && previewView.visibility == View.VISIBLE && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
+                            android.util.Log.d("UltraToneTiming", "guide processing to display ${(System.nanoTime() - now) / 1_000_000} ms")
                             effect.updateDepthGuide(guides.depth, guides.focusDepth, guides.focusOnPerson)
                         } else {
                             if (!guides.depth.isRecycled) guides.depth.recycle()
@@ -1517,10 +1523,13 @@ class MainActivity : ComponentActivity() {
         longExposureFinalizing = false
         longExposureStartedAtMs = SystemClock.elapsedRealtime()
         longExposureFrameCount = 0
+        previousLongFrameTimestamp = 0L
+        waitingLongFrame = null
+        longExposureExif = emptyMap()
         longExposureAccumulator = LongExposureMerger()
         longExposureContext = LongExposureCaptureContext(
             currentZoomRatio, focusX, focusY, lensFacing, styleStrength, activeFinish,
-            infinityFocusEnabled, currentEffects()
+            infinityFocusEnabled, currentEffects(), Size(previewView.width, previewView.height)
         )
         isBusy = true
         pendingPhotoCount++
@@ -1532,7 +1541,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun captureLongExposureFrame() {
-        if (!longExposureHoldActive || longExposureFrameCaptureInFlight || longExposureFrameProcessing) return
+        if (!longExposureHoldActive || longExposureFrameCaptureInFlight || waitingLongFrame != null) return
         val capture = imageCapture
         if (capture == null) {
             stopLongExposureAfterCaptureError("Camera stopped during long exposure.")
@@ -1541,6 +1550,10 @@ class MainActivity : ComponentActivity() {
         longExposureFrameCaptureInFlight = true
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
+                val timestamp = image.imageInfo.timestamp
+                if (previousLongFrameTimestamp != 0L) android.util.Log.d("UltraToneTiming",
+                    "long frame interval ${(timestamp - previousLongFrameTimestamp) / 1_000_000} ms")
+                previousLongFrameTimestamp = timestamp
                 val frame = try {
                     check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
                     val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
@@ -1567,10 +1580,21 @@ class MainActivity : ComponentActivity() {
             stopLongExposureAfterCaptureError("Long exposure was cancelled.")
             return
         }
+        if (longExposureFrameProcessing) {
+            waitingLongFrame = frame
+            return
+        }
+        mergeLongFrame(accumulator, frame)
+    }
+
+    private fun mergeLongFrame(accumulator: LongExposureMerger, frame: LongExposureMerger.Frame) {
         longExposureFrameProcessing = true
+        val first = longExposureFrameCount == 0
+        captureLongExposureFrame()
         photoProcessingExecutor.execute {
             val error = try {
-                accumulator.add(frame)
+                if (first) longExposureExif = captureExif(frame.jpegBytes)
+                timed("long frame merge") { accumulator.add(frame) }
                 null
             } catch (e: Exception) {
                 e.localizedMessage ?: "frame processing failed"
@@ -1578,11 +1602,15 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 longExposureFrameProcessing = false
                 if (error != null) {
+                    waitingLongFrame = null
                     stopLongExposureAfterCaptureError("Long exposure failed: $error")
                     return@runOnUiThread
                 }
                 longExposureFrameCount = accumulator.frameCount()
-                if (longExposureHoldActive) captureLongExposureFrame() else finalizeLongExposure()
+                val waiting = waitingLongFrame
+                waitingLongFrame = null
+                if (waiting != null) mergeLongFrame(accumulator, waiting)
+                else if (longExposureHoldActive) captureLongExposureFrame() else finalizeLongExposure()
             }
         }
     }
@@ -1608,6 +1636,7 @@ class MainActivity : ComponentActivity() {
         longExposureFinalizing = true
         longExposureAccumulator = null
         longExposureContext = null
+        val exif = longExposureExif
         val frames = longExposureFrameCount
         longExposureFrameCount = 0
         releaseCaptureAndApplyPendingRebind()
@@ -1620,7 +1649,7 @@ class MainActivity : ComponentActivity() {
                 processCapturedBitmap(
                     merged, context.zoom, context.focusX, context.focusY, context.facing,
                     ReferenceRenderer.Mode.LONG_EXPOSURE, context.strength, context.finish,
-                    infinityFocusAtCapture = context.infinityFocus, effectsAtCapture = context.effects
+                    infinityFocusAtCapture = context.infinityFocus, effectsAtCapture = context.effects, previewSize = context.previewSize, exif = exif
                 )
             } catch (e: Exception) {
                 runOnUiThread {
@@ -1629,8 +1658,6 @@ class MainActivity : ComponentActivity() {
                     message("Long exposure merge failed: ${e.localizedMessage ?: "unknown error"}")
                     updateStatus()
                 }
-            } finally {
-                longExposureFinalizing = false
             }
         }
     }
@@ -1638,6 +1665,10 @@ class MainActivity : ComponentActivity() {
     private fun stopLongExposureAfterCaptureError(messageText: String) {
         longExposureHoldActive = false
         longExposureHandler.removeCallbacks(longExposureTicker)
+        if (longExposureFrameProcessing || longExposureFrameCaptureInFlight) {
+            message(messageText)
+            return
+        }
         if (longExposureFrameCount > 0 && longExposureAccumulator != null && longExposureContext != null) {
             finalizeLongExposure()
             message("$messageText Saving the frames already captured.")
@@ -1685,6 +1716,7 @@ class MainActivity : ComponentActivity() {
         val nightEnhanceAtCapture = nightEnhancementEnabled && modeAtCapture == ReferenceRenderer.Mode.NIGHT
         val infinityFocusAtCapture = infinityFocusEnabled
         val effectsAtCapture = currentEffects()
+        val previewSize = Size(previewView.width, previewView.height)
         val bokehLevelAtCapture = bokehLevel
         if (modeAtCapture == ReferenceRenderer.Mode.NIGHT && !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF) {
             captureNightFrames(capture, mutableListOf(), 0) { frames ->
@@ -1704,10 +1736,10 @@ class MainActivity : ComponentActivity() {
                         refreshShutterAvailability()
                         showQueueStatus()
                     }
-                    photoProcessingExecutor.execute {
+                    enqueuePhoto {
                         try {
-                            val merged = if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames)
-                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
+                            val merged = timed("night merge") { if (detailMergeAtCapture) NightBurstMerger.mergeDetail(frames) else NightBurstMerger.merge(frames) }
+                            processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture, facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(frames.first().jpegBytes))
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1742,11 +1774,11 @@ class MainActivity : ComponentActivity() {
                         setStatusMessage("Building photo stack…")
                         showQueueStatus()
                     }
-                    photoProcessingExecutor.execute {
+                    enqueuePhoto {
                         try {
-                            val merged = NightBurstMerger.mergeDetail(frames)
+                            val merged = timed("stack merge") { NightBurstMerger.mergeDetail(frames) }
                             processCapturedBitmap(merged, zoom, focusXAtCapture, focusYAtCapture,
-                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
+                                facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(frames.first().jpegBytes))
                         } catch (e: Exception) {
                             runOnUiThread {
                                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1803,14 +1835,14 @@ class MainActivity : ComponentActivity() {
                         showQueueStatus()
                     }
                 }
-                photoProcessingExecutor.execute {
+                enqueuePhoto {
                     try {
                         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
-                        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
-                            decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image")
+                        val bitmap = timed("decode") { BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
+                            decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image") }
                         processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
-                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture)
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(jpeg))
                     } catch (e: Exception) {
                         runOnUiThread {
                             pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -1929,6 +1961,21 @@ class MainActivity : ComponentActivity() {
             })
     }
 
+    private inline fun <T> timed(stage: String, action: () -> T): T {
+        val start = SystemClock.elapsedRealtime()
+        return try { action() } finally {
+            android.util.Log.d("UltraToneTiming", "$stage ${SystemClock.elapsedRealtime() - start} ms")
+        }
+    }
+
+    private fun enqueuePhoto(action: () -> Unit) {
+        val queued = SystemClock.elapsedRealtime()
+        photoProcessingExecutor.execute {
+            android.util.Log.d("UltraToneTiming", "queue wait ${SystemClock.elapsedRealtime() - queued} ms")
+            timed("photo processing") { action() }
+        }
+    }
+
     private fun processCapturedBitmap(
         upright: Bitmap,
         zoom: Float,
@@ -1941,7 +1988,9 @@ class MainActivity : ComponentActivity() {
         nightEnhanceAtCapture: Boolean = false,
         infinityFocusAtCapture: Boolean = false,
         effectsAtCapture: ReferenceRenderer.Effects = ReferenceRenderer.Effects(),
-        bokehLevelAtCapture: Int = 0
+        bokehLevelAtCapture: Int = 0,
+        previewSize: Size,
+        exif: Map<String, String>
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -1950,19 +1999,19 @@ class MainActivity : ComponentActivity() {
             val imageForStyle = if (nightEnhanceAtCapture && modeAtCapture == ReferenceRenderer.Mode.NIGHT) {
                 NightEnhancement.apply(upright).also { enhanced = it }
             } else upright
-            val styled = ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture, effectsAtCapture)
+            val styled = timed("grade") { ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture, effectsAtCapture) }
             style = styled
             val focus = mapFocusToFrame(
-                focusXAtCapture, focusYAtCapture, previewView.width, previewView.height,
+                focusXAtCapture, focusYAtCapture, previewSize.width, previewSize.height,
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
             val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
-                PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture)
+                timed("bokeh") { PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture) }
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
             runOnUiThread { setStatusMessage("Saving photo…") }
-            val uri = saveBitmap(rendered)
+            val uri = timed("gallery save") { saveBitmap(rendered, exif) }
             lastPhotoUri = uri
             val savedPortrait = portrait
             if (rendered !== styled) styled.recycle()
@@ -1970,7 +2019,7 @@ class MainActivity : ComponentActivity() {
                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                 refreshShutterAvailability()
                 updateThumbnail(rendered)
-                message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
+                message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
                     "Saved; Bokeh blur could not detect usable depth or a person" else if (pendingPhotoCount > 0)
                     "Photo saved; processing the next photo" else "Photo saved to Pictures/UltraTone")
                 rendered.recycle()
@@ -1991,22 +2040,53 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun saveBitmap(bitmap: Bitmap): Uri {
+    private fun captureExif(jpeg: ByteArray): Map<String, String> =
+        try { jpeg.inputStream().use { captureExif(ExifInterface(it)) } } catch (_: Exception) { emptyMap() }
+
+    private fun captureExif(source: ExifInterface): Map<String, String> = listOf(
+        ExifInterface.TAG_MAKE, ExifInterface.TAG_MODEL, ExifInterface.TAG_DATETIME_ORIGINAL,
+        ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER, ExifInterface.TAG_FOCAL_LENGTH,
+        ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY
+    ).mapNotNull { tag -> source.getAttribute(tag)?.let { tag to it } }.toMap()
+
+    private fun saveBitmap(bitmap: Bitmap, exif: Map<String, String>): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "UltraTone-${System.currentTimeMillis()}.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/UltraTone")
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/UltraTone")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+            }
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("Could not create photo in gallery")
-        contentResolver.openOutputStream(uri).use { stream ->
-            if (stream == null || !bitmap.compress(Bitmap.CompressFormat.JPEG, 93, stream)) error("Photo encoding failed")
+        try {
+            timed("JPEG encode and write") {
+                contentResolver.openOutputStream(uri).use { stream ->
+                    if (stream == null || !bitmap.compress(Bitmap.CompressFormat.JPEG, 93, stream)) error("Photo encoding failed")
+                }
+            }
+            if (exif.isNotEmpty()) {
+                contentResolver.openFileDescriptor(uri, "rw").use { descriptor ->
+                    val output = ExifInterface(requireNotNull(descriptor).fileDescriptor)
+                    for ((tag, value) in exif) output.setAttribute(tag, value)
+                    output.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
+                    output.saveAttributes()
+                }
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 29) {
+                val publish = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                check(contentResolver.update(uri, publish, null, null) == 1) { "Could not publish photo" }
+            }
+        } catch (e: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw e
         }
         return uri
     }
 
     private fun updateThumbnail(bitmap: Bitmap) {
-        val thumb = Bitmap.createScaledBitmap(bitmap, 80, 80, true)
+        val thumb = android.media.ThumbnailUtils.extractThumbnail(bitmap, 80, 80)
         thumbnailButton.setImageBitmap(thumb)
     }
 
@@ -2018,9 +2098,11 @@ class MainActivity : ComponentActivity() {
                 contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, bounds) }
                 val decoded = contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, decodeOptions(bounds.outWidth, bounds.outHeight)) }
                     ?: error("Unsupported photo")
+                val importedTags = try { contentResolver.openInputStream(uri)?.use { captureExif(ExifInterface(it)) }.orEmpty() } catch (_: Exception) { emptyMap() }
                 val upright = orient(decoded, uri)
                 runOnUiThread {
-                    sourceBitmap?.recycle()
+                    importedExif = importedTags
+                    renderedBitmap = null
                     sourceBitmap = upright
                     previewView.visibility = View.GONE
                     imageView.visibility = View.VISIBLE
@@ -2058,7 +2140,7 @@ class MainActivity : ComponentActivity() {
                 val output = portrait?.bitmap ?: styled
                 if (output !== styled) styled.recycle()
                 runOnUiThread {
-                    renderedBitmap?.recycle()
+                    if (isDestroyed || sourceBitmap !== source) { output.recycle(); return@runOnUiThread }
                     renderedBitmap = output
                     imageView.setImageBitmap(output)
                     status.visibility = View.GONE
@@ -2069,19 +2151,20 @@ class MainActivity : ComponentActivity() {
 
     private fun savePhoto() {
         val bitmap = renderedBitmap ?: run { message("Choose a photo first."); return }
-        val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        // The save task holds an immutable render until encoding completes.
+        val tags = importedExif
         cameraExecutor.execute {
             try {
-                val uri = saveBitmap(copy)
+                val uri = saveBitmap(bitmap, tags)
                 lastPhotoUri = uri
-                runOnUiThread { updateThumbnail(copy); message("Saved to Pictures/UltraTone"); copy.recycle() }
-            } catch (e: Exception) { copy.recycle(); runOnUiThread { message("Save failed: ${e.localizedMessage ?: "storage error"}") } }
+                runOnUiThread { updateThumbnail(bitmap); message("Saved to Pictures/UltraTone") }
+            } catch (e: Exception) { runOnUiThread { message("Save failed: ${e.localizedMessage ?: "storage error"}") } }
         }
     }
 
     private fun showCamera() {
-        sourceBitmap?.recycle(); sourceBitmap = null
-        renderedBitmap?.recycle(); renderedBitmap = null
+        sourceBitmap = null
+        renderedBitmap = null
         imageView.setImageDrawable(null)
         imageView.visibility = View.GONE
         processedPreviewView.setImageDrawable(null)
@@ -2207,8 +2290,8 @@ class MainActivity : ComponentActivity() {
         photoProcessingExecutor.shutdown()
         analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         analysisExecutor.shutdown()
-        sourceBitmap?.recycle()
-        renderedBitmap?.recycle()
+        sourceBitmap = null
+        renderedBitmap = null
         processedPreviewView.setImageDrawable(null)
         retirePreviewBitmap(processedPreviewBitmap)
         processedPreviewBitmap = null

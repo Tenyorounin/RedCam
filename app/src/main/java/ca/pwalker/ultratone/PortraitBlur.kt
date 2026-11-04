@@ -73,6 +73,21 @@ object PortraitBlur {
         else Result(source, false, false)
     }
 
+    private fun depthRange(values: FloatArray): Pair<Float, Float> {
+        val bins = IntArray(256)
+        for (value in values) bins[(value * 255f).roundToInt()]++
+        fun percentile(fraction: Float): Float {
+            val index = (values.size * fraction).toInt().coerceAtMost(values.lastIndex)
+            var count = 0
+            for (level in bins.indices) {
+                count += bins[level]
+                if (count > index) return level / 255f
+            }
+            return 1f
+        }
+        return percentile(0.06f) to percentile(0.94f)
+    }
+
     private fun createDepthGuide(
         context: Context,
         source: Bitmap,
@@ -80,16 +95,13 @@ object PortraitBlur {
         focusX: Float,
         focusY: Float
     ): PreviewGuides? {
-        val mask = try {
-            Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 10, TimeUnit.SECONDS)
-        } catch (_: Exception) { null }
+        val maskTask = try { segmenter.process(InputImage.fromBitmap(source, 0)) } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
+        val mask = try { maskTask?.let { Tasks.await(it, 10, TimeUnit.SECONDS) } } catch (_: Exception) { null }
         // A person mask alone cannot tell whether the background is actually farther
         // away. Do not invent shallow depth of field when depth inference is unavailable.
         if (depth == null) return null
-        val ordered = depth.values.sortedArray()
-        val low = ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)]
-        val high = ordered[(ordered.size * 0.94f).toInt().coerceIn(0, ordered.lastIndex)]
+        val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
         val maskWidth = mask?.width ?: 0
         val maskHeight = mask?.height ?: 0
@@ -176,9 +188,7 @@ object PortraitBlur {
         focusY: Float,
         bokehLevel: Int
     ): Result {
-        val ordered = depth.values.sortedArray()
-        val low = ordered[(ordered.size * 0.06f).toInt().coerceIn(0, ordered.lastIndex)]
-        val high = ordered[(ordered.size * 0.94f).toInt().coerceIn(0, ordered.lastIndex)]
+        val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
         val sampleX = (focusX.coerceIn(0f, 1f) * (depth.width - 1)).toInt()
         val sampleY = (focusY.coerceIn(0f, 1f) * (depth.height - 1)).toInt()

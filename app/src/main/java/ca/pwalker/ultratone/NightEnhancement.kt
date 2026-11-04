@@ -16,6 +16,24 @@ import kotlin.math.pow
 internal object NightEnhancement {
     private const val MAX_MAP_SIDE = 480
 
+    private val curve by lazy {
+        // Precompute the non-linear restoration curve to keep the full-size pass cheap.
+        val curve = ByteArray(256 * 256)
+        for (light in 0..255) {
+            val local = light / 255f
+            val mappedLight = 0.93f * local.pow(0.78f) + 0.018f
+            for (value in 0..255) {
+                val y = value / 255f
+                val reflectance = (y / (local + 0.045f)).coerceIn(0f, 2.6f)
+                val restored = (mappedLight * reflectance.pow(0.90f)).coerceIn(0f, 1f)
+                val result = (y + (restored - y) * 0.72f).coerceIn(0f, 1f)
+                curve[(light shl 8) or value] = (result * 255f + 0.5f).toInt().toByte()
+            }
+        }
+
+        curve
+    }
+
     fun apply(source: Bitmap): Bitmap {
         val scale = min(1f, MAX_MAP_SIDE.toFloat() / max(source.width, source.height))
         val mapWidth = max(1, (source.width * scale).toInt())
@@ -36,20 +54,6 @@ internal object NightEnhancement {
         val fine = boxBlur(luma, mapWidth, mapHeight, max(2, min(mapWidth, mapHeight) / 64))
         val broad = boxBlur(luma, mapWidth, mapHeight, max(4, min(mapWidth, mapHeight) / 20))
         val illumination = FloatArray(luma.size) { i -> fine[i] * 0.62f + broad[i] * 0.38f }
-
-        // Precompute the non-linear restoration curve to keep the full-size pass cheap.
-        val curve = ByteArray(256 * 256)
-        for (light in 0..255) {
-            val local = light / 255f
-            val mappedLight = 0.93f * local.pow(0.78f) + 0.018f
-            for (value in 0..255) {
-                val y = value / 255f
-                val reflectance = (y / (local + 0.045f)).coerceIn(0f, 2.6f)
-                val restored = (mappedLight * reflectance.pow(0.90f)).coerceIn(0f, 1f)
-                val result = (y + (restored - y) * 0.72f).coerceIn(0f, 1f)
-                curve[(light shl 8) or value] = (result * 255f + 0.5f).toInt().toByte()
-            }
-        }
 
         val output = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         val row = IntArray(source.width)
