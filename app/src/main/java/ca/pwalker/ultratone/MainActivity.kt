@@ -456,17 +456,21 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(2), 0, 0)
         }
         thumbnailButton = ImageButton(this).apply {
-            contentDescription = "Open the last photo; long press to choose a photo"
+            contentDescription = "Open Google Photos; long press to choose a photo"
             background = rounded(0xff33353a.toInt(), 12)
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageResource(android.R.drawable.ic_menu_gallery)
             setOnClickListener {
-                val uri = lastPhotoUri
-                if (uri == null) choosePhoto.launch("image/*")
-                else try {
-                    startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "image/*")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
-                } catch (_: Exception) { choosePhoto.launch("image/*") }
+                val launch = packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
+                if (launch == null) {
+                    message("Google Photos is not installed or is disabled.")
+                } else {
+                    try {
+                        startActivity(launch)
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        message("Google Photos could not be opened.")
+                    }
+                }
             }
             setOnLongClickListener { choosePhoto.launch("image/*"); true }
         }

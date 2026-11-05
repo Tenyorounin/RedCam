@@ -2,6 +2,10 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <queries>
+        <package android:name="com.google.android.apps.photos" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ultratone_launcher"
