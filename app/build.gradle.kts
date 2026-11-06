@@ -39,7 +39,7 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 41
+        versionCode = 42
         versionName = "0.5.14"
     }
 
