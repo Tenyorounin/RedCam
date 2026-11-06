@@ -82,7 +82,7 @@ internal class SensorDepth private constructor(val reader: ImageReader) {
     fun attach(context: Context, builder: Preview.Builder, failed: () -> Unit) {
         val defaults = Camera2UseCaseConfigFactory(context).getConfig(UseCaseConfigFactory.CaptureType.PREVIEW,
             ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-        val unpack = defaults.retrieveOption(UseCaseConfig.OPTION_SESSION_CONFIG_UNPACKER)
+        val unpack = requireNotNull(defaults.retrieveOption(UseCaseConfig.OPTION_SESSION_CONFIG_UNPACKER))
         builder.setSessionOptionUnpacker { size, config, session ->
             unpack.unpack(size,config,session)
             session.addSurface(surface)

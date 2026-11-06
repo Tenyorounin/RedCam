@@ -1060,7 +1060,13 @@ class MainActivity : ComponentActivity() {
                 } catch (_: Exception) {
                     baseAnalysis?.clearAnalyzer()
                     provider.unbindAll()
-                    camera = provider.bindToLifecycle(this, baseSelector, basePreview, baseCapture)
+                    val fallbackPreview = if (sensorDepth != null) {
+                        rejectedDepthCameras.add(Camera2CameraInfo.from(provider.getCameraInfo(baseSelector)).cameraId)
+                        sensorDepth?.close()
+                        sensorDepth = null
+                        newPreview()
+                    } else basePreview
+                    camera = provider.bindToLifecycle(this, baseSelector, fallbackPreview, baseCapture)
                     capture = baseCapture
                 }
             }
