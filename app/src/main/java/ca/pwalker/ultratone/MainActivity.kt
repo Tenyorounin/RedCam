@@ -1157,16 +1157,18 @@ class MainActivity : ComponentActivity() {
             val pixels = IntArray(sampleWidth * sampleHeight)
             val pixelStride = plane.pixelStride
             val rowStride = plane.rowStride
+            val rowBytes = ByteArray((width - 1) * pixelStride + 4)
+            val sampleOffsets = IntArray(sampleWidth) { x -> (x * width / sampleWidth) * pixelStride }
             for (y in 0 until sampleHeight) {
                 val sourceY = y * height / sampleHeight
-                val rowOffset = sourceY * rowStride
+                buffer.position(sourceY * rowStride)
+                buffer.get(rowBytes)
                 for (x in 0 until sampleWidth) {
-                    val sourceX = x * width / sampleWidth
-                    val offset = rowOffset + sourceX * pixelStride
-                    val r = buffer.get(offset).toInt() and 0xff
-                    val g = buffer.get(offset + 1).toInt() and 0xff
-                    val b = buffer.get(offset + 2).toInt() and 0xff
-                    val a = buffer.get(offset + 3).toInt() and 0xff
+                    val offset = sampleOffsets[x]
+                    val r = rowBytes[offset].toInt() and 0xff
+                    val g = rowBytes[offset + 1].toInt() and 0xff
+                    val b = rowBytes[offset + 2].toInt() and 0xff
+                    val a = rowBytes[offset + 3].toInt() and 0xff
                     pixels[y * sampleWidth + x] = Color.argb(a, r, g, b)
                 }
             }

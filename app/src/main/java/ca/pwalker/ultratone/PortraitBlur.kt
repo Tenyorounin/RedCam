@@ -18,6 +18,17 @@ import kotlin.math.roundToInt
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
     private data class Highlight(val x: Int, val y: Int, val color: Int, val strength: Float, val blur: Float)
+    private data class ApertureTap(val x: Float, val y: Float, val weight: Float)
+    private val aperture = buildList {
+        for (iy in -4..4) for (ix in -4..4) {
+            val x = ix / 4f
+            val y = iy / 4f
+            val distance = kotlin.math.sqrt(x * x + y * y)
+            val weight = 1f - smoothstep(((distance - 0.78f) / (1f - 0.78f)).coerceIn(0f, 1f))
+            if (weight > 0f) add(ApertureTap(x, y, weight))
+        }
+    }
+    private val apertureWeight = aperture.fold(0f) { sum, tap -> sum + tap.weight }
     private val linearChannel = FloatArray(256) { value ->
         val encoded = value / 255f
         if (encoded <= 0.04045f) encoded / 12.92f
@@ -250,22 +261,42 @@ object PortraitBlur {
         val bgRow = IntArray(source.width)
         val confidenceRow = FloatArray(maskWidth)
         var subjectPixels = 0
+        val depthX = FloatArray(source.width) { x ->
+            x.toFloat() / max(1, source.width - 1) * (depth.width - 1)
+        }
+        val depthRows = Array(2) { FloatArray(source.width) }
+        val cachedRow = intArrayOf(-1, -1)
+        fun expandedRow(y: Int): FloatArray {
+            val slot = y % 2
+            val expanded = depthRows[slot]
+            if (cachedRow[slot] != y) {
+                val base = y * depth.width
+                for (x in expanded.indices) {
+                    val left = depthX[x].toInt()
+                    val fraction = depthX[x] - left
+                    expanded[x] = depth.values[base + left] * (1f - fraction) +
+                        depth.values[base + min(left + 1, depth.width - 1)] * fraction
+                }
+                cachedRow[slot] = y
+            }
+            return expanded
+        }
 
         for (y in 0 until source.height) {
             source.getPixels(row, 0, source.width, 0, y, source.width, 1)
             background.getPixels(bgRow, 0, source.width, 0, y, source.width, 1)
-            val my = min(depth.height - 1, y * depth.height / source.height)
+            val fy = y.toFloat() / max(1, source.height - 1) * (depth.height - 1)
+            val top = expandedRow(fy.toInt())
+            val bottom = expandedRow(min(fy.toInt() + 1, depth.height - 1))
+            val fraction = fy - fy.toInt()
             val maskY = if (mask != null) min(maskHeight - 1, y * maskHeight / source.height) else 0
             if (confidence != null) {
                 confidence.position(maskY * maskWidth)
                 confidence.get(confidenceRow, 0, maskWidth)
             }
             for (x in 0 until source.width) {
-                val relative = ((sampleDepth(
-                    depth,
-                    x.toFloat() / max(1, source.width - 1),
-                    y.toFloat() / max(1, source.height - 1)
-                ) - low) / span).coerceIn(0f, 1f)
+                val sampled = top[x] * (1f - fraction) + bottom[x] * fraction
+                val relative = ((sampled - low) / span).coerceIn(0f, 1f)
                 var blurAmount = defocusAmount(relative, focused)
                 if (confidence != null && mask != null) {
                     val maskX = min(maskWidth - 1, x * maskWidth / source.width)
@@ -307,12 +338,6 @@ object PortraitBlur {
         val maxRadius = blurRadius(bokehLevel)
         val blurAmounts = FloatArray(input.size)
         val backgroundEligible = BooleanArray(input.size)
-        val offsets = ArrayList<Pair<Float, Float>>(49)
-        for (iy in -4..4) for (ix in -4..4) {
-            val ox = ix / 4f
-            val oy = iy / 4f
-            if (ox * ox + oy * oy <= 1.001f) offsets += ox to oy
-        }
         fun depthAt(x: Int, y: Int): Float {
             val nx = x.toFloat() / max(1, width - 1)
             val ny = y.toFloat() / max(1, height - 1)
@@ -353,16 +378,15 @@ object PortraitBlur {
                 continue
             }
             val radius = maxRadius * amount
-            var red = 0f; var green = 0f; var blue = 0f; var total = 0f
-            for ((ox, oy) in offsets) {
+            var red = 0f; var green = 0f; var blue = 0f
+            for (i in aperture.indices) {
+                val (ox, oy, weight) = aperture[i]
                 val sx = (x + ox * radius).roundToInt().coerceIn(0, width - 1)
                 val sy = (y + oy * radius).roundToInt().coerceIn(0, height - 1)
                 val c = backgroundLayer[sy * width + sx]
-                val distance = kotlin.math.sqrt(ox * ox + oy * oy)
-                val weight = 1f - smoothstep(((distance - 0.78f) / (1f - 0.78f)).coerceIn(0f, 1f))
-                red += Color.red(c) * weight; green += Color.green(c) * weight; blue += Color.blue(c) * weight; total += weight
+                red += Color.red(c) * weight; green += Color.green(c) * weight; blue += Color.blue(c) * weight
             }
-            val blurred = if (total > 0f) Color.rgb((red / total).toInt(), (green / total).toInt(), (blue / total).toInt()) else backgroundLayer[center]
+            val blurred = Color.rgb((red / apertureWeight).toInt(), (green / apertureWeight).toInt(), (blue / apertureWeight).toInt())
             output[center] = blurred
         }
         renderHighlightDiscs(output, width, height, blurAmounts, backgroundEligible, highlights, maxRadius, bokehLevel)
