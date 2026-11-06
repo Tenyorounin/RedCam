@@ -55,13 +55,9 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
                 val buffer = output.byteBuffer.duplicate()
                 buffer.rewind()
                 val values = FloatArray(mapWidth * mapHeight)
-                for (y in 0 until mapHeight) {
-                    for (x in 0 until mapWidth) {
-                        // Rotate the model output clockwise into camera coordinates.
-                        values[x * mapHeight + mapHeight - 1 - y] = (buffer.get().toInt() and 255) / 255f
-                    }
-                }
-                return DepthMap(mapHeight, mapWidth, refineDarkEdges(values, mapHeight, mapWidth))
+                // The oriented bitmap and the model output both use row-major image coordinates.
+                for (i in values.indices) values[i] = (buffer.get().toInt() and 255) / 255f
+                return DepthMap(mapWidth, mapHeight, refineDarkEdges(values, mapWidth, mapHeight))
             }
         }
     }
