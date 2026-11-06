@@ -121,6 +121,8 @@ class MainActivity : ComponentActivity() {
     private var imageCapture: ImageCapture? = null
     private var previewUseCase: Preview? = null
     private var imageAnalysis: ImageAnalysis? = null
+    @Volatile private var sensorDepth: SensorDepth? = null
+    private val rejectedDepthCameras = mutableSetOf<String>()
     private var cameraProvider: ProcessCameraProvider? = null
     private var extensionsManager: ExtensionsManager? = null
     private var boundCamera: Camera? = null
@@ -967,11 +969,32 @@ class MainActivity : ComponentActivity() {
             // CameraX extensions support Preview and ImageCapture, not ImageAnalysis.
             // Bind the vendor Night pipeline without analysis so it isn't silently
             // rejected and replaced by our software fallback.
-            fun newPreview() = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                .build().also {
+            fun newPreview(): Preview {
+                val builder = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                if (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
+                    val id = Camera2CameraInfo.from(provider.getCameraInfo(baseSelector)).cameraId
+                    if (id !in rejectedDepthCameras) {
+                        runCatching {
+                            val info = getSystemService(android.hardware.camera2.CameraManager::class.java).getCameraCharacteristics(id)
+                            SensorDepth.open(info)?.let { stream ->
+                                sensorDepth = stream
+                                stream.attach(this, builder) {
+                                    runOnUiThread {
+                                        if (!isDestroyed && sensorDepth === stream) {
+                                            rejectedDepthCameras.add(id)
+                                            requestCameraRebind()
+                                        }
+                                    }
+                                }
+                            }
+                        }.onFailure { sensorDepth?.close(); sensorDepth = null }
+                    }
+                }
+                return builder.build().also {
                     previewUseCase = it
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
+            }
             fun newCapture(mode: Int): ImageCapture {
                 val builder = ImageCapture.Builder()
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
@@ -987,6 +1010,8 @@ class MainActivity : ComponentActivity() {
                 .build()
 
             provider.unbindAll()
+            sensorDepth?.close()
+            sensorDepth = null
             previewUseCase = null
             var camera: Camera? = null
             var capture: ImageCapture? = null
@@ -1901,8 +1926,8 @@ class MainActivity : ComponentActivity() {
                                 if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) {
                                     fun focusAt(w: Int, h: Int) = mapFocusToFrame(focusXAtCapture, focusYAtCapture,
                                         previewSize.width, previewSize.height, w, h, facingAtCapture == CameraSelector.LENS_FACING_FRONT)
-                                    NightBurstMerger.mergeDetail(frames, ::focusAt) { base ->
-                                        PortraitBlur.prepareStack(this@MainActivity, base, focusAt(base.width, base.height))
+                                    NightBurstMerger.mergeDetail(frames, ::focusAt) { base, frame ->
+                                        PortraitBlur.prepareStack(this@MainActivity, base, focusAt(base.width, base.height), frame.depth)
                                             .also { guide = it }
                                     }
                                 } else NightBurstMerger.mergeDetail(frames)
@@ -1954,6 +1979,7 @@ class MainActivity : ComponentActivity() {
                     return
                 }
                 val rotation = image.imageInfo.rotationDegrees
+                val depthSample = sensorDepth?.takeIf { kotlin.math.abs(zoom - 1f) < 0.001f }?.match(image.imageInfo.timestamp, rotation)
                 image.close()
                 if (modeAtCapture != ReferenceRenderer.Mode.DAY) runOnUiThread { showPolaroidFeedback() }
                 runOnUiThread {
@@ -1972,7 +1998,7 @@ class MainActivity : ComponentActivity() {
                         val bitmap = timed("decode") { BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
                             decodeOptions(bounds.outWidth, bounds.outHeight)) ?: error("Could not decode captured image") }
                         processCapturedBitmap(rotate(bitmap, rotation), zoom, focusXAtCapture, focusYAtCapture,
-                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(jpeg))
+                            facingAtCapture, modeAtCapture, strengthAtCapture, finishAtCapture, nightEnhanceAtCapture, infinityFocusAtCapture, effectsAtCapture, bokehLevelAtCapture, previewSize, captureExif(jpeg), sensorSample = depthSample)
                     } catch (e: Exception) {
                         runOnUiThread {
                             pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
@@ -2075,7 +2101,7 @@ class MainActivity : ComponentActivity() {
                             ?: error("Night capture returned no image data")
                         val jpeg = ByteArray(buffer.remaining())
                         buffer.get(jpeg)
-                        nextFrame = NightBurstMerger.Frame(jpeg, image.imageInfo.rotationDegrees)
+                        nextFrame = NightBurstMerger.Frame(jpeg, image.imageInfo.rotationDegrees, sensorDepth?.takeIf { kotlin.math.abs(currentZoomRatio - 1f) < 0.001f }?.match(image.imageInfo.timestamp, image.imageInfo.rotationDegrees))
                     } catch (_: Exception) { }
                     image.close()
                     if (nextFrame == null) {
@@ -2122,7 +2148,8 @@ class MainActivity : ComponentActivity() {
         bokehLevelAtCapture: Int = 0,
         previewSize: Size,
         exif: Map<String, String>,
-        stackGuide: PortraitBlur.StackGuide? = null
+        stackGuide: PortraitBlur.StackGuide? = null,
+        sensorSample: SensorDepth.Sample? = null
     ) {
         var style: Bitmap? = null
         var enhanced: Bitmap? = null
@@ -2139,7 +2166,8 @@ class MainActivity : ComponentActivity() {
             )
             val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
                 timed("bokeh") {
-                    if (stackGuide != null) PortraitBlur.applyStack(styled, stackGuide, focus, bokehLevelAtCapture)
+                    val guide = stackGuide ?: sensorSample?.let { PortraitBlur.prepareStack(this@MainActivity, upright, focus, it) }
+                    if (guide != null) PortraitBlur.applyStack(styled, guide, focus, bokehLevelAtCapture)
                     else PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture)
                 }
             } catch (_: Exception) { null }) else null
@@ -2424,6 +2452,8 @@ class MainActivity : ComponentActivity() {
         focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
         longExposureHandler.removeCallbacks(longExposureTicker)
         super.onDestroy()
+        sensorDepth?.close()
+        sensorDepth = null
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         liveCameraEffect?.close()
         liveCameraEffect = null

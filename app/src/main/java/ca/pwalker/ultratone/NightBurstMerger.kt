@@ -11,14 +11,14 @@ import kotlin.math.max
  * Work stays on the photo-processing executor. We only blend pixels that remain
  * close between frames, so moving details fall back to the first exposure.
  */
-object NightBurstMerger {
+internal object NightBurstMerger {
     private const val MAX_DECODE_PIXELS = 16_000_000L
     private const val ALIGNMENT_SCALE = 16
     private const val DETAIL_ALIGNMENT_SCALE = 8
     private const val MAX_LUMA_DELTA = 24
     private const val MAX_RGB_DELTA = 72
 
-    data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int)
+    data class Frame(val jpegBytes: ByteArray, val rotationDegrees: Int, val depth: SensorDepth.Sample? = null)
 
     /**
      * Two-frame photo stack for the optional deblur mode. Start with whichever
@@ -26,7 +26,7 @@ object NightBurstMerger {
      * its partner. This keeps moving edges from becoming double images.
      */
     internal fun mergeDetail(frames: List<Frame>, focusAt: ((Int, Int) -> Pair<Float, Float>)? = null,
-                             prepare: ((Bitmap) -> PortraitBlur.StackGuide)? = null): Bitmap {
+                             prepare: ((Bitmap, Frame) -> PortraitBlur.StackGuide)? = null): Bitmap {
         require(frames.size == 2) { "Photo stack expects two captures" }
         val firstScore = sharpnessScore(frames[0], focusAt)
         val secondScore = sharpnessScore(frames[1], focusAt)
@@ -42,7 +42,7 @@ object NightBurstMerger {
      * retained so stationary areas remain close to the first exposure.
      */
     private fun mergeInternal(frames: List<Frame>, detailAlignment: Boolean,
-                              prepare: ((Bitmap) -> PortraitBlur.StackGuide)? = null): Bitmap {
+                              prepare: ((Bitmap, Frame) -> PortraitBlur.StackGuide)? = null): Bitmap {
         require(frames.size == 2) { "Burst merge expects two captures" }
         // Decode the reference mutable so we can reuse it directly. This avoids
         // a full-resolution bitmap copy on the capture-processing path.
@@ -51,7 +51,7 @@ object NightBurstMerger {
         try {
             val width = base.width
             val height = base.height
-            val guide = prepare?.invoke(base)
+            val guide = prepare?.invoke(base, frames[0])
             if (guide != null && guide.weights.isEmpty()) return base
             val map = guide?.depth
             val columns = map?.let { IntArray(width) { x -> x * it.width / width } }

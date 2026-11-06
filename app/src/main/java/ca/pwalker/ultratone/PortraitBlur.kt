@@ -37,9 +37,10 @@ object PortraitBlur {
         val weights: ByteArray
     )
 
-    internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>): StackGuide {
-        val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
+    internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>, sensor: SensorDepth.Sample? = null): StackGuide {
+        val estimated = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
             ?: return StackGuide(null, null, ByteArray(0))
+        val depth = sensor?.fuse(estimated, source.width, source.height) ?: estimated
         val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
         )
@@ -79,7 +80,7 @@ object PortraitBlur {
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
         )
         fun apply(source: Bitmap, focusX: Float = 0.5f, focusY: Float = 0.5f, bokehLevel: Int = 0): Result =
-            PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel)
+            PortraitBlur.apply(appContext, source, segmenter, focusX, focusY, bokehLevel, refineEdges = false)
 
         /** Builds compact depth and foreground guides for the GPU live preview. */
         fun createDepthGuide(source: Bitmap, focusX: Float, focusY: Float, level: Int): PreviewGuides? {
@@ -97,13 +98,14 @@ object PortraitBlur {
         segmenter: Segmenter,
         focusX: Float,
         focusY: Float,
-        bokehLevel: Int
+        bokehLevel: Int,
+        refineEdges: Boolean = true
     ): Result {
         val mask = try {
             Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS)
         } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
-        return if (depth != null) applyDepth(source, mask, depth, focusX, focusY, bokehLevel)
+        return if (depth != null) applyDepth(source, mask, depth, focusX, focusY, bokehLevel, refineEdges)
         else Result(source, false, false)
     }
 
@@ -233,7 +235,8 @@ object PortraitBlur {
         depth: RelativeDepthEstimator.DepthMap,
         focusX: Float,
         focusY: Float,
-        bokehLevel: Int
+        bokehLevel: Int,
+        refineEdges: Boolean = true
     ): Result {
         val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
@@ -271,6 +274,21 @@ object PortraitBlur {
             return expanded
         }
 
+        // Refine only cells spanning a depth boundary. Use the original pixel
+        // color to distinguish opposite sides of the contour while upsampling.
+        val colors = if (refineEdges) IntArray(depth.values.size) else IntArray(0)
+        val boundary = BooleanArray(colors.size)
+        if (refineEdges) {
+            val guide = Bitmap.createScaledBitmap(source, depth.width, depth.height, true)
+            guide.getPixels(colors, 0, depth.width, 0, 0, depth.width, depth.height)
+            if (guide !== source) guide.recycle()
+            for (dy in 1 until depth.height - 1) for (dx in 1 until depth.width - 1) {
+                val i = dy * depth.width + dx
+                val ds = depth.values
+                boundary[i] = maxOf(ds[i-1], ds[i+1], ds[i-depth.width], ds[i+depth.width]) -
+                    minOf(ds[i-1], ds[i+1], ds[i-depth.width], ds[i+depth.width]) > 0.08f * span
+            }
+        }
         for (y in 0 until source.height) {
             source.getPixels(row, 0, source.width, 0, y, source.width, 1)
             background.getPixels(bgRow, 0, source.width, 0, y, source.width, 1)
@@ -284,7 +302,25 @@ object PortraitBlur {
                 confidence.get(confidenceRow, 0, maskWidth)
             }
             for (x in 0 until source.width) {
-                val sampled = top[x] * (1f - fraction) + bottom[x] * fraction
+                var sampled = top[x] * (1f - fraction) + bottom[x] * fraction
+                val cell = fy.toInt() * depth.width + depthX[x].toInt()
+                if (refineEdges && boundary[cell]) {
+                    val color = row[x]
+                    var total = 0f
+                    var weighted = 0f
+                    for (dy in -1..1) for (dx in -1..1) {
+                        val j = cell + dy * depth.width + dx
+                        val c = colors[j]
+                        val delta = kotlin.math.abs(Color.red(color)-Color.red(c)) +
+                            kotlin.math.abs(Color.green(color)-Color.green(c)) +
+                            kotlin.math.abs(Color.blue(color)-Color.blue(c))
+                        val similarity = (1f - delta / 90f).coerceAtLeast(0f)
+                        val weight = similarity * similarity / (1 + dx*dx + dy*dy)
+                        weighted += depth.values[j] * weight
+                        total += weight
+                    }
+                    sampled = (weighted + sampled * 0.15f) / (total + 0.15f)
+                }
                 val relative = ((sampled - low) / span).coerceIn(0f, 1f)
                 var blurAmount = defocusAmount(relative, focused)
                 if (confidence != null && mask != null) {
