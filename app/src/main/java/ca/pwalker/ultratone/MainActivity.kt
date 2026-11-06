@@ -456,23 +456,11 @@ class MainActivity : ComponentActivity() {
             setPadding(0, dp(2), 0, 0)
         }
         thumbnailButton = ImageButton(this).apply {
-            contentDescription = "Open Google Photos; long press to choose a photo"
+            contentDescription = "View UltraTone photos"
             background = rounded(0xff33353a.toInt(), 12)
             scaleType = ImageView.ScaleType.CENTER_CROP
             setImageResource(android.R.drawable.ic_menu_gallery)
-            setOnClickListener {
-                val launch = packageManager.getLaunchIntentForPackage("com.google.android.apps.photos")
-                if (launch == null) {
-                    message("Google Photos is not installed or is disabled.")
-                } else {
-                    try {
-                        startActivity(launch)
-                    } catch (_: android.content.ActivityNotFoundException) {
-                        message("Google Photos could not be opened.")
-                    }
-                }
-            }
-            setOnLongClickListener { choosePhoto.launch("image/*"); true }
+            setOnClickListener { startActivity(Intent(this@MainActivity, AlbumActivity::class.java)) }
         }
         captureControls.addView(thumbnailButton, LinearLayout.LayoutParams(dp(42), dp(42)))
         captureControls.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
