@@ -18,17 +18,6 @@ import kotlin.math.roundToInt
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
     private data class Highlight(val x: Int, val y: Int, val color: Int, val strength: Float, val blur: Float)
-    private data class ApertureTap(val x: Float, val y: Float, val weight: Float)
-    private val aperture = buildList {
-        for (iy in -4..4) for (ix in -4..4) {
-            val x = ix / 4f
-            val y = iy / 4f
-            val distance = kotlin.math.sqrt(x * x + y * y)
-            val weight = 1f - smoothstep(((distance - 0.78f) / (1f - 0.78f)).coerceIn(0f, 1f))
-            if (weight > 0f) add(ApertureTap(x, y, weight))
-        }
-    }
-    private val apertureWeight = aperture.fold(0f) { sum, tap -> sum + tap.weight }
     private val linearChannel = FloatArray(256) { value ->
         val encoded = value / 255f
         if (encoded <= 0.04045f) encoded / 12.92f
@@ -369,25 +358,41 @@ object PortraitBlur {
             backgroundLayer[i] = if (nearest >= 0) input[nearest] else input[i]
         }
 
-        val output = IntArray(input.size)
+        // Sum each filled disk as contiguous horizontal spans. Even large disks
+        // cover every texel without repeating a sparse grid of point samples.
+        val stride = width + 1
+        val red = IntArray(height * stride)
+        val green = IntArray(red.size)
+        val blue = IntArray(red.size)
+        for (y in 0 until height) for (x in 0 until width) {
+            val c = backgroundLayer[y * width + x]
+            val i = y * stride + x
+            red[i + 1] = red[i] + Color.red(c)
+            green[i + 1] = green[i] + Color.green(c)
+            blue[i + 1] = blue[i] + Color.blue(c)
+        }
+        val spans = Array(ceilRadius(maxRadius) + 1) { r ->
+            IntArray(2 * r + 1) { row ->
+                kotlin.math.sqrt((r * r - (row - r) * (row - r)).toDouble()).toInt()
+            }
+        }
+        val output = input.copyOf()
         for (y in 0 until height) for (x in 0 until width) {
             val center = y * width + x
-            val amount = blurAmounts[center]
-            if (amount < 0.04f) {
-                output[center] = input[center]
-                continue
+            val radius = (maxRadius * blurAmounts[center]).roundToInt()
+            if (radius == 0 || blurAmounts[center] < 0.04f) continue
+            var r = 0; var g = 0; var b = 0; var count = 0
+            for (dy in max(-radius, -y)..min(radius, height - 1 - y)) {
+                val reach = spans[radius][dy + radius]
+                val row = (y + dy) * stride
+                val left = row + max(0, x - reach)
+                val right = row + min(width, x + reach + 1)
+                r += red[right] - red[left]
+                g += green[right] - green[left]
+                b += blue[right] - blue[left]
+                count += right - left
             }
-            val radius = maxRadius * amount
-            var red = 0f; var green = 0f; var blue = 0f
-            for (i in aperture.indices) {
-                val (ox, oy, weight) = aperture[i]
-                val sx = (x + ox * radius).roundToInt().coerceIn(0, width - 1)
-                val sy = (y + oy * radius).roundToInt().coerceIn(0, height - 1)
-                val c = backgroundLayer[sy * width + sx]
-                red += Color.red(c) * weight; green += Color.green(c) * weight; blue += Color.blue(c) * weight
-            }
-            val blurred = Color.rgb((red / apertureWeight).toInt(), (green / apertureWeight).toInt(), (blue / apertureWeight).toInt())
-            output[center] = blurred
+            output[center] = Color.rgb(r / count, g / count, b / count)
         }
         renderHighlightDiscs(output, width, height, blurAmounts, backgroundEligible, highlights, maxRadius, bokehLevel)
         val blurred = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -412,9 +417,11 @@ object PortraitBlur {
         val luminance = FloatArray(pixels.size) { luma(pixels[it]) }
         val suppressed = BooleanArray(pixels.size)
         val highlights = ArrayList<Highlight>(32)
-        val ring = intArrayOf(-4, -3, 3, 4)
-        for (y in 4 until height - 4) {
-            for (x in 4 until width - 4) {
+        val step = max(1, (max(width, height) / 256f).roundToInt())
+        val border = 4 * step
+        val ring = intArrayOf(-border, -3 * step, 3 * step, border)
+        for (y in border until height - border) {
+            for (x in border until width - border) {
                 val index = y * width + x
                 val peak = luminance[index]
                 if (suppressed[index] || !backgroundEligible[index] || blurAmounts[index] < 0.22f || peak < 0.62f) continue
@@ -431,7 +438,7 @@ object PortraitBlur {
                 var localPeak = true
                 for (dy in -2..2) for (dx in -2..2) {
                     if (!localPeak || (dx == 0 && dy == 0)) continue
-                    val neighborIndex = (y + dy) * width + x + dx
+                    val neighborIndex = (y + dy * step) * width + x + dx * step
                     val neighbor = luminance[neighborIndex]
                     if (neighbor > peak + 0.003f ||
                         (kotlin.math.abs(neighbor - peak) <= 0.003f && neighborIndex < index)
@@ -441,7 +448,7 @@ object PortraitBlur {
 
                 var red = 0f; var green = 0f; var blue = 0f; var colorWeight = 0f
                 for (dy in -2..2) for (dx in -2..2) {
-                    val colorIndex = (y + dy) * width + x + dx
+                    val colorIndex = (y + dy * step) * width + x + dx * step
                     val weight = (luminance[colorIndex] - 0.42f).coerceAtLeast(0f)
                     if (weight <= 0f) continue
                     val color = pixels[colorIndex]
@@ -460,8 +467,8 @@ object PortraitBlur {
                 val contrastStrength = ((contrast - 0.08f) / 0.42f).coerceIn(0f, 1f)
                 val strength = (0.25f + 0.75f * peakStrength) * (0.35f + 0.65f * contrastStrength)
                 highlights += Highlight(x, y, sourceColor, strength.coerceIn(0.18f, 1f), blurAmounts[index])
-                for (dy in -5..5) for (dx in -5..5) {
-                    if (dx * dx + dy * dy <= 25 && x + dx in 0 until width && y + dy in 0 until height) suppressed[(y + dy) * width + x + dx] = true
+                for (dy in -5 * step..5 * step) for (dx in -5 * step..5 * step) {
+                    if (dx * dx + dy * dy <= 25 * step * step && x + dx in 0 until width && y + dy in 0 until height) suppressed[(y + dy) * width + x + dx] = true
                 }
                 if (highlights.size >= 96) return highlights
             }

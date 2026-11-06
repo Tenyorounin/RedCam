@@ -84,7 +84,29 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
             }
             if (contrast >= 20) result[i] = nearest
         }
-        return result
+        val aligned = result.copyOf()
+        fun rgb(x: Int, y: Int) = pixels[(y * INPUT_SIZE / height) * INPUT_SIZE + x * INPUT_SIZE / width]
+        for (y in 2 until height - 2) for (x in 2 until width - 2) {
+            val i = y * width + x
+            val near = maxOf(result[i - 2], result[i + 2], result[i - 2 * width], result[i + 2 * width])
+            val far = minOf(result[i - 2], result[i + 2], result[i - 2 * width], result[i + 2 * width])
+            if (near - far < 0.10f) continue
+            val center = rgb(x, y)
+            var sum = 0f
+            var total = 0f
+            for (dy in -2..2) for (dx in -2..2) {
+                val c = rgb(x + dx, y + dy)
+                val difference = kotlin.math.abs(Color.red(c) - Color.red(center)) +
+                    kotlin.math.abs(Color.green(c) - Color.green(center)) +
+                    kotlin.math.abs(Color.blue(c) - Color.blue(center))
+                val similarity = (1f - difference / 72f).coerceAtLeast(0f)
+                val weight = similarity * similarity
+                sum += result[i + dy * width + dx] * weight
+                total += weight
+            }
+            aligned[i] = sum / total
+        }
+        return aligned
     }
 
     override fun close() { session.close() }
