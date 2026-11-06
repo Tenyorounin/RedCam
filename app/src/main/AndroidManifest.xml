@@ -2,11 +2,18 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <queries>
+        <package android:name="com.google.android.apps.photos" />
+    </queries>
+
     <application
         android:allowBackup="false"
+        android:icon="@mipmap/ultratone_launcher"
         android:label="UltraTone"
+        android:roundIcon="@mipmap/ultratone_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:usesCleartextTraffic="false">
+        <activity android:name=".AlbumActivity" android:exported="false" />
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|keyboardHidden"

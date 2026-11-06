@@ -4,77 +4,140 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /** CPU version of the live GPU grade, used to render full-resolution captures. */
 object ReferenceRenderer {
-    enum class Mode { DAY, NIGHT, CLOSE_UP }
+    enum class Mode { DAY, NIGHT, CLOSE_UP, SUNSET, LONG_EXPOSURE, LANDSCAPE }
     enum class Finish { COLOUR, BLACK_AND_WHITE }
+
+    data class Effects(
+        val glow: Boolean = false,
+        val vignette: Boolean = false
+    )
 
     fun render(
         source: Bitmap,
         strength: Float,
         mode: Mode = Mode.DAY,
         zoomRatio: Float = 1f,
-        finish: Finish = Finish.COLOUR
+        finish: Finish = Finish.COLOUR,
+        effects: Effects = Effects()
     ): Bitmap {
         val amount = strength.coerceIn(0f, 1f)
         val width = source.width
         val height = source.height
-        val input = IntArray(width)
-        val outputRow = IntArray(width)
         val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val detailScale = 0.035f + ((zoomRatio - 1f) / 4f).coerceIn(0f, 1f) * 0.025f
         val night = if (mode == Mode.NIGHT) 1f else 0f
+        val sunset = mode == Mode.SUNSET
+        val haloX = max(1, width / 150)
+        val haloY = max(1, height / 150)
+        val needHaloRows = effects.glow
+        val rowsPerBatch = 128
+        val readHalo = if (needHaloRows) haloY else 0
+        val inputBatch = IntArray(width * (rowsPerBatch + readHalo * 2))
+        val outputBatch = IntArray(width * rowsPerBatch)
 
-        for (y in 0 until height) {
-            source.getPixels(input, 0, width, 0, y, width, 1)
-            for (x in 0 until width) {
-                val pixel = input[x]
+        for (batchStart in 0 until height step rowsPerBatch) {
+            val batchRows = min(rowsPerBatch, height - batchStart)
+            val readTop = (batchStart - readHalo).coerceAtLeast(0)
+            val readBottom = (batchStart + batchRows - 1 + readHalo).coerceAtMost(height - 1)
+            val readRows = readBottom - readTop + 1
+            source.getPixels(inputBatch, 0, width, 0, readTop, width, readRows)
+            for (y in batchStart until batchStart + batchRows) {
+                val inputRow = (y - readTop) * width
+                val upperRow = ((y - haloY).coerceIn(0, height - 1) - readTop) * width
+                val lowerRow = ((y + haloY).coerceIn(0, height - 1) - readTop) * width
+                val outputRow = (y - batchStart) * width
+                val v = if (height <= 1) 0f else (y.toFloat() / (height - 1) - 0.5f) * 2f
+                for (x in 0 until width) {
+                val pixel = inputBatch[inputRow + x]
                 val alpha = pixel ushr 24 and 0xff
                 val r = (pixel ushr 16 and 0xff) / 255f
                 val g = (pixel ushr 8 and 0xff) / 255f
                 val b = (pixel and 0xff) / 255f
                 val luma = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                var nr: Float
+                var ng: Float
+                var nb: Float
 
                 if (finish == Finish.BLACK_AND_WHITE) {
                     val mono = 0.28f * r + 0.62f * g + 0.10f * b
                     val bw = ((mono - 0.46f) * 1.16f + 0.46f).coerceIn(0f, 1f)
                     val value = luma + (bw - luma) * amount
-                    val grey = toByte(value)
-                    outputRow[x] = Color.argb(alpha, grey, grey, grey)
-                    continue
+                    nr = value
+                    ng = value
+                    nb = value
+                } else {
+                    var target = (luma - 0.46f) * 1.08f + 0.46f + ((0.46f - luma) * 0.08f).coerceIn(-0.025f, 0.025f)
+                    target += 0.014f * (1f - smoothstep(0f, 0.30f, target))
+                    val shoulder = smoothstep(0.72f, 1f, target)
+                    target -= 0.16f * shoulder * max(target - 0.72f, 0f)
+                    val detail = ((luma - 0.46f) * detailScale).coerceIn(-0.025f, 0.025f)
+                    target = (luma + (target + detail - luma) * amount).coerceIn(0f, 1f)
+
+                    val saturation = max(r, max(g, b)) - min(r, min(g, b))
+                    val chromaScale = 1.04f + saturation.coerceIn(0f, 0.6f) * 0.10f
+                    nr = target + (r - luma) * chromaScale
+                    ng = target + (g - luma) * chromaScale
+                    nb = target + (b - luma) * chromaScale
+
+                    val warmTone = smoothstep(0.02f, 0.22f, min(r, g) - b)
+                    val greenTone = smoothstep(0.015f, 0.18f, g - max(r, b))
+                    val shadow = 1f - smoothstep(0.08f, 0.58f, luma)
+                    val highlight = smoothstep(0.56f, 0.96f, luma)
+                    nr += (0.012f * warmTone + 0.006f * highlight - 0.003f * shadow) * amount
+                    ng += (-0.010f * greenTone + 0.001f * highlight) * amount
+                    nb += (-0.008f * warmTone - 0.005f * highlight + (0.004f + 0.004f * night) * shadow) * amount
+                    if (night > 0f) {
+                        nr *= 1f - 0.025f * shadow
+                        nb *= 1f + 0.025f * shadow
+                    }
+                    if (sunset) {
+                        nr += 0.020f * highlight - 0.012f * shadow
+                        ng += 0.004f * highlight + 0.003f * shadow
+                        nb += -0.024f * highlight + 0.020f * shadow
+                    }
                 }
 
-                var target = (luma - 0.46f) * 1.08f + 0.46f + ((0.46f - luma) * 0.08f).coerceIn(-0.025f, 0.025f)
-                target += 0.014f * (1f - smoothstep(0f, 0.30f, target))
-                val shoulder = smoothstep(0.72f, 1f, target)
-                target -= 0.16f * shoulder * max(target - 0.72f, 0f)
-                val detail = ((luma - 0.46f) * detailScale).coerceIn(-0.025f, 0.025f)
-                target = (luma + (target + detail - luma) * amount).coerceIn(0f, 1f)
-
-                val saturation = max(r, max(g, b)) - min(r, min(g, b))
-                val chromaScale = 1.04f + saturation.coerceIn(0f, 0.6f) * 0.10f
-                var nr = target + (r - luma) * chromaScale
-                var ng = target + (g - luma) * chromaScale
-                var nb = target + (b - luma) * chromaScale
-
-                val warmTone = smoothstep(0.02f, 0.22f, min(r, g) - b)
-                val greenTone = smoothstep(0.015f, 0.18f, g - max(r, b))
-                val shadow = 1f - smoothstep(0.08f, 0.58f, luma)
-                val highlight = smoothstep(0.56f, 0.96f, luma)
-                nr += (0.012f * warmTone + 0.006f * highlight - 0.003f * shadow) * amount
-                ng += (-0.010f * greenTone + 0.001f * highlight) * amount
-                nb += (-0.008f * warmTone - 0.005f * highlight + (0.004f + 0.004f * night) * shadow) * amount
-                if (night > 0f) {
-                    nr *= 1f - 0.025f * shadow
-                    nb *= 1f + 0.025f * shadow
+                if (effects.glow) {
+                    val left = inputBatch[inputRow + (x - haloX).coerceIn(0, width - 1)]
+                    val right = inputBatch[inputRow + (x + haloX).coerceIn(0, width - 1)]
+                    val glowSource = max(
+                        lumaOf(inputBatch[upperRow + x]),
+                        max(lumaOf(inputBatch[lowerRow + x]), max(lumaOf(left), lumaOf(right)))
+                    )
+                    if (effects.glow) {
+                        val bloom = smoothstep(0.68f, 0.97f, glowSource) * 0.075f
+                        nr += bloom
+                        ng += bloom * 0.98f
+                        nb += bloom * 0.92f
+                    }
                 }
-                outputRow[x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
+
+                if (effects.vignette) {
+                    val u = if (width <= 1) 0f else (x.toFloat() / (width - 1) - 0.5f) * 2f
+                    val radius = sqrt(u * u + v * v)
+                    val falloff = smoothstep(0.48f, 1.32f, radius)
+                    val scale = 1f - 0.20f * falloff
+                    nr *= scale
+                    ng *= scale
+                    nb *= scale
+                }
+
+                outputBatch[outputRow + x] = Color.argb(alpha, toByte(nr), toByte(ng), toByte(nb))
+                }
             }
-            output.setPixels(outputRow, 0, width, 0, y, width, 1)
+            output.setPixels(outputBatch, 0, width, 0, batchStart, width, batchRows)
         }
         return output
     }
+
+    private fun lumaOf(color: Int): Float =
+        (0.2126f * (color ushr 16 and 0xff) +
+            0.7152f * (color ushr 8 and 0xff) +
+            0.0722f * (color and 0xff)) / 255f
 
     private fun smoothstep(edge0: Float, edge1: Float, value: Float): Float {
         val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
