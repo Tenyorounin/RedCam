@@ -117,12 +117,12 @@ class AlbumActivity : Activity() {
                     }.getOrNull() ?: return@submit
                     thumbs.put(id, bitmap)
                     runOnUiThread {
-                        if (!isDestroyed && image.getTag(android.R.id.icon) == id)
+                        if (!isDestroyed && image.getTag(R.id.album_photo_id) == id)
                             image.setImageBitmap(bitmap)
                     }
                 }
             }
-            image.setTag(android.R.id.icon, id)
+            image.setTag(R.id.album_photo_id, id)
             return image
         }
     }
