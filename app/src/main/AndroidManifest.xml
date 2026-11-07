@@ -16,6 +16,7 @@
         <activity android:name=".AlbumActivity" android:exported="false" />
         <activity
             android:name=".MainActivity"
+            android:theme="@style/UltraToneLaunch"
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true">
             <intent-filter>

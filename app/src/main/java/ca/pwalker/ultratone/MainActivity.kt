@@ -218,6 +218,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(android.R.style.Theme_Material_NoActionBar)
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
@@ -530,10 +531,7 @@ class MainActivity : ComponentActivity() {
         moreMenuPanel.addView(detailMergeButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
-        val depthRow = LinearLayout(this)
-        depthRow.addView(bokehButton, LinearLayout.LayoutParams(0, dp(32), 1f))
-        depthRow.addView(pill("Depth info") { showDepthInfo() }, LinearLayout.LayoutParams(dp(88), dp(32)))
-        moreMenuPanel.addView(depthRow, LinearLayout.LayoutParams(
+        moreMenuPanel.addView(bokehButton, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         moreMenuPanel.addView(nightEnhancementButton, LinearLayout.LayoutParams(
@@ -1581,48 +1579,6 @@ class MainActivity : ComponentActivity() {
         nightEnhancementButton.setTextColor(if (nightEnhancementEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
         nightEnhancementButton.setTypeface(null, if (nightEnhancementEnabled) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
         nightEnhancementButton.contentDescription = "Night-only low-light enhancement, $state"
-    }
-
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun showDepthInfo() {
-        val manager = getSystemService(android.hardware.camera2.CameraManager::class.java)
-        val selected = boundCamera?.let { Camera2CameraInfo.from(it.cameraInfo).cameraId }
-        val report = runCatching {
-            val ids = manager.cameraIdList.toMutableSet()
-            if (android.os.Build.VERSION.SDK_INT >= 28) {
-                for (id in ids.toList()) {
-                    runCatching { manager.getCameraCharacteristics(id).physicalCameraIds }.getOrNull()?.let { ids.addAll(it) }
-                }
-            }
-            ids.joinToString("\n\n") { id ->
-                val label = if (id == selected) "Camera $id (selected)" else "Camera $id"
-                runCatching {
-                    val info = manager.getCameraCharacteristics(id)
-                    val mm = info.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                        ?.joinToString("/") ?: "?"
-                    val sizes = info.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                        ?.getOutputSizes(android.graphics.ImageFormat.DEPTH16)
-                    val mode = when {
-                        sizes.isNullOrEmpty() -> "No DEPTH16 stream advertised"
-                        else -> {
-                            val use = when (info.get(CameraCharacteristics.DEPTH_DEPTH_IS_EXCLUSIVE)) {
-                                true -> "depth only"
-                                false -> "color + depth advertised"
-                                null -> "color compatibility unknown"
-                            }
-                            "$use · " + sizes.joinToString(", ")
-                        }
-                    }
-                    "$label · ${mm} mm\n$mode"
-                }.getOrElse { "$label · characteristics unavailable" }
-            }
-        }.getOrElse { "Camera characteristics unavailable." }
-        android.app.AlertDialog.Builder(this).setTitle("Camera depth support")
-            .setMessage(report).setPositiveButton("Close", null)
-            .setNeutralButton("Copy") { _, _ ->
-                getSystemService(android.content.ClipboardManager::class.java)
-                    .setPrimaryClip(android.content.ClipData.newPlainText("Camera depth support", report))
-            }.show()
     }
 
     private fun updateMoreMenu() {
