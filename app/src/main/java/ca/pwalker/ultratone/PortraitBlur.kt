@@ -38,14 +38,15 @@ object PortraitBlur {
     )
 
     internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>, sensor: SensorDepth.Sample? = null): StackGuide {
-        val estimated = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
-            ?: return StackGuide(null, null, ByteArray(0))
-        val depth = sensor?.fuse(estimated, source.width, source.height) ?: estimated
         val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
         )
-        val person = try { Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS) }
+        val task = try { segmenter.process(InputImage.fromBitmap(source, 0)) } catch (_: Exception) { null }
+        val estimated = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
+        val person = try { task?.let { Tasks.await(it, 30, TimeUnit.SECONDS) } }
             catch (_: Exception) { null } finally { segmenter.close() }
+        if (estimated == null) return StackGuide(null, person, ByteArray(0))
+        val depth = sensor?.fuse(estimated, source.width, source.height) ?: estimated
         val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
         val focused = ((focusDepthAt(depth, focus.first, focus.second) - low) / span).coerceIn(0f, 1f)
@@ -101,10 +102,9 @@ object PortraitBlur {
         bokehLevel: Int,
         refineEdges: Boolean = true
     ): Result {
-        val mask = try {
-            Tasks.await(segmenter.process(InputImage.fromBitmap(source, 0)), 30, TimeUnit.SECONDS)
-        } catch (_: Exception) { null }
+        val task = try { segmenter.process(InputImage.fromBitmap(source, 0)) } catch (_: Exception) { null }
         val depth = try { DepthHolder.get(context).estimate(source) } catch (_: Exception) { null }
+        val mask = try { task?.let { Tasks.await(it, 30, TimeUnit.SECONDS) } } catch (_: Exception) { null }
         return if (depth != null) applyDepth(source, mask, depth, focusX, focusY, bokehLevel, refineEdges)
         else Result(source, false, false)
     }

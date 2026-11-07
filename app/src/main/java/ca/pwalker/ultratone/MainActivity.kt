@@ -998,7 +998,7 @@ class MainActivity : ComponentActivity() {
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setCaptureMode(mode)
                     .setFlashMode(if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) ImageCapture.FLASH_MODE_OFF else flashMode)
-                if (activeMode == ReferenceRenderer.Mode.DAY) builder.setJpegQuality(100)
+                if (activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.CLOSE_UP) builder.setJpegQuality(100)
                 return builder.build()
             }
             fun newAnalysis() = ImageAnalysis.Builder()
@@ -1031,10 +1031,10 @@ class MainActivity : ComponentActivity() {
 
             if (camera == null) {
                 val basePreview = newPreview()
-                // Prioritize response in Day mode. The software night burst
+                // Prioritize response in Day and Bokeh modes. The software night burst
                 // uses ZSL when flash is off; CameraX falls back if unsupported.
                 val baseCaptureMode = when {
-                    activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                    activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.CLOSE_UP || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     activeMode != ReferenceRenderer.Mode.NIGHT -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                     flashMode == ImageCapture.FLASH_MODE_OFF -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
                     else -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
@@ -1651,8 +1651,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         longExposureFrameCaptureInFlight = true
+        val captureRequestedAt = SystemClock.elapsedRealtime()
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(image: ImageProxy) {
+                android.util.Log.d("UltraToneTiming", "capture delivery ${SystemClock.elapsedRealtime() - captureRequestedAt} ms")
                 val timestamp = image.imageInfo.timestamp
                 if (previousLongFrameTimestamp != 0L) android.util.Log.d("UltraToneTiming",
                     "long frame interval ${(timestamp - previousLongFrameTimestamp) / 1_000_000} ms")
@@ -1910,6 +1912,7 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val captureRequestedAt = SystemClock.elapsedRealtime()
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureStarted() {
                 runOnUiThread {
@@ -1924,6 +1927,7 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onCaptureSuccess(image: ImageProxy) {
+                android.util.Log.d("UltraToneTiming", "capture delivery ${SystemClock.elapsedRealtime() - captureRequestedAt} ms")
                 val jpeg = try {
                     check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
                     val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
@@ -2054,8 +2058,10 @@ class MainActivity : ComponentActivity() {
             onComplete(frames.toList())
             return
         }
+        val captureRequestedAt = SystemClock.elapsedRealtime()
         capture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
                 override fun onCaptureSuccess(image: ImageProxy) {
+                    android.util.Log.d("UltraToneTiming", "capture delivery ${SystemClock.elapsedRealtime() - captureRequestedAt} ms")
                     var nextFrame: NightBurstMerger.Frame? = null
                     try {
                         check(image.format == android.graphics.ImageFormat.JPEG) { "Night capture returned an unsupported image format" }
