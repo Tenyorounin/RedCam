@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var bokehLevel = 0
     @Volatile private var nightEnhancementEnabled = false
     @Volatile private var infinityFocusEnabled = false
+    @Volatile private var sculptEnabled = false
     @Volatile private var glowEnabled = false
     private lateinit var moreMenuPanel: LinearLayout
     @Volatile private var vignetteEnabled = false
@@ -227,6 +228,7 @@ class MainActivity : ComponentActivity() {
         bokehLevel = getPreferences(MODE_PRIVATE).getInt("bokeh_level", 0).coerceIn(0, 3)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
+        sculptEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_sculpt", false)
         glowEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_glow", false)
         vignetteEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_vignette", false)
         buildScreen()
@@ -440,7 +442,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
-        listOf("glow", "vignette").forEach { effect ->
+        listOf("glow", "vignette", "sculpt").forEach { effect ->
             val button = pill(effectLabel(effect)) { toggleCreativeEffect(effect) }.apply {
                 textSize = 11f
                 maxLines = 1
@@ -1537,14 +1539,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun effectLabel(effect: String) = when (effect) {
+        "sculpt" -> "Sculpt"
         "glow" -> "Glow"
         else -> "Vignette"
     }
 
-    private fun currentEffects() = ReferenceRenderer.Effects(glowEnabled, vignetteEnabled)
+    private fun currentEffects() = ReferenceRenderer.Effects(glowEnabled, vignetteEnabled, sculptEnabled)
 
     private fun toggleCreativeEffect(effect: String) {
         when (effect) {
+            "sculpt" -> {
+                sculptEnabled = !sculptEnabled
+                getPreferences(MODE_PRIVATE).edit().putBoolean("effect_sculpt", sculptEnabled).apply()
+            }
             "glow" -> {
                 glowEnabled = !glowEnabled
                 getPreferences(MODE_PRIVATE).edit().putBoolean("effect_glow", glowEnabled).apply()
@@ -1563,6 +1570,7 @@ class MainActivity : ComponentActivity() {
         if (creativeEffectButtons.isEmpty()) return
         creativeEffectButtons.forEach { (effect, button) ->
             val enabled = when (effect) {
+                "sculpt" -> sculptEnabled
                 "glow" -> glowEnabled
                 else -> vignetteEnabled
             }

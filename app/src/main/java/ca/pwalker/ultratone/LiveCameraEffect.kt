@@ -30,6 +30,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("monochrome", 0)
         shader.setIntUniform("depthEnabled", 0)
         shader.setIntUniform("ringsOnly", 0)
+        shader.setIntUniform("sculptEnabled", 0)
         shader.setIntUniform("glowEnabled", 0)
         shader.setIntUniform("vignetteEnabled", 0)
         shader.setFloatUniform("viewSize", 1f, 1f)
@@ -58,6 +59,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             ReferenceRenderer.Mode.LONG_EXPOSURE -> 4
             ReferenceRenderer.Mode.LANDSCAPE -> 5
         })
+        shader.setIntUniform("sculptEnabled", if (effects.sculpt) 1 else 0)
         shader.setIntUniform("glowEnabled", if (effects.glow) 1 else 0)
         shader.setIntUniform("vignetteEnabled", if (effects.vignette) 1 else 0)
         shader.setIntUniform("monochrome", if (finish == ReferenceRenderer.Finish.BLACK_AND_WHITE) 1 else 0)
@@ -157,6 +159,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform int nightEnhancement;
             uniform int depthEnabled;
             uniform int ringsOnly;
+            uniform int sculptEnabled;
             uniform int glowEnabled;
             uniform int vignetteEnabled;
             uniform float2 viewSize;
@@ -278,6 +281,30 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     }
                 }
                 float3 result = grade(rgb);
+                if (sculptEnabled == 1) {
+                    float lum = lumaOf(base.rgb);
+                    float total = lum * 2.0;
+                    float weights = 2.0;
+                    float2 stepSize = max(floor(viewSize / 32.0), float2(1.0));
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            if (dx == 0 && dy == 0) continue;
+                            float2 pos = clamp(p + float2(float(dx), float(dy)) * stepSize, float2(0.5), max(viewSize - 0.5, float2(0.5)));
+                            float sampleLum = lumaOf(cameraImage.eval(pos).rgb);
+                            float weight = 1.0 - smoothstep(0.06, 0.22, abs(sampleLum - lum));
+                            total += sampleLum * weight;
+                            weights += weight;
+                        }
+                    }
+                    float local = clamp((lum - total / weights) * 0.35, -0.035, 0.035);
+                    float shadow = smoothstep(0.035, 0.18, lum) * (1.0 - smoothstep(0.30, 0.52, lum));
+                    float light = smoothstep(0.40, 0.65, lum) * (1.0 - smoothstep(0.78, 0.96, lum));
+                    float protect = smoothstep(0.02, 0.12, lum) * (1.0 - smoothstep(0.82, 0.98, lum));
+                    float delta = local * protect - 0.035 * shadow + 0.025 * light;
+                    float gain = 1.0 + delta / max(lum, 0.08);
+                    gain = min(gain, 1.0 / max(0.001, max(result.r, max(result.g, result.b))));
+                    result *= gain;
+                }
                 if (glowEnabled == 1) {
                     float2 haloOffset = max(viewSize / 150.0, float2(1.0));
                     float halo = max(

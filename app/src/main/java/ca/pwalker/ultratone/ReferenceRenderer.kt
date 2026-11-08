@@ -13,7 +13,8 @@ object ReferenceRenderer {
 
     data class Effects(
         val glow: Boolean = false,
-        val vignette: Boolean = false
+        val vignette: Boolean = false,
+        val sculpt: Boolean = false
     )
 
     fun render(
@@ -35,7 +36,9 @@ object ReferenceRenderer {
         val haloY = max(1, height / 150)
         val needHaloRows = effects.glow
         val rowsPerBatch = 128
-        val readHalo = if (needHaloRows) haloY else 0
+        val sculptX = max(1, width / 32)
+        val sculptY = max(1, height / 32)
+        val readHalo = max(if (needHaloRows) haloY else 0, if (effects.sculpt) sculptY else 0)
         val inputBatch = IntArray(width * (rowsPerBatch + readHalo * 2))
         val outputBatch = IntArray(width * rowsPerBatch)
 
@@ -99,6 +102,31 @@ object ReferenceRenderer {
                         ng += 0.004f * highlight + 0.003f * shadow
                         nb += -0.024f * highlight + 0.020f * shadow
                     }
+                }
+
+                if (effects.sculpt) {
+                    // Broad, range-weighted light shaping, not edge sharpening.
+                    // Ignore strong discontinuities to limit halos at silhouettes.
+                    var total = luma * 2f
+                    var weights = 2f
+                    for (dy in -1..1) for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val sx = (x + dx * sculptX).coerceIn(0, width - 1)
+                        val sy = (y + dy * sculptY).coerceIn(0, height - 1)
+                        val sample = lumaOf(inputBatch[(sy - readTop) * width + sx])
+                        val weight = 1f - smoothstep(0.06f, 0.22f, kotlin.math.abs(sample - luma))
+                        total += sample * weight
+                        weights += weight
+                    }
+                    val local = ((luma - total / weights) * 0.35f).coerceIn(-0.035f, 0.035f)
+                    val shadow = smoothstep(0.035f, 0.18f, luma) * (1f - smoothstep(0.30f, 0.52f, luma))
+                    val light = smoothstep(0.40f, 0.65f, luma) * (1f - smoothstep(0.78f, 0.96f, luma))
+                    val protect = smoothstep(0.02f, 0.12f, luma) * (1f - smoothstep(0.82f, 0.98f, luma))
+                    val delta = local * protect - 0.035f * shadow + 0.025f * light
+                    val gain = 1f + delta / max(luma, 0.08f)
+                    // Shared channel gain preserves hue and neutral B&W.
+                    val safeGain = min(gain, 1f / max(0.001f, max(nr, max(ng, nb))))
+                    nr *= safeGain; ng *= safeGain; nb *= safeGain
                 }
 
                 if (effects.glow) {
