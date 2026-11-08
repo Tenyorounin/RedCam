@@ -1162,6 +1162,7 @@ class MainActivity : ComponentActivity() {
         }
         lastPreviewFrameNanos = now
         var styled: Bitmap? = null
+        var frameClosed = false
         val focusMoved = lastLiveDepthFocusX.isNaN() || lastLiveDepthFocusY.isNaN() ||
             kotlin.math.abs(focusX - lastLiveDepthFocusX) > 0.01f ||
             kotlin.math.abs(focusY - lastLiveDepthFocusY) > 0.01f
@@ -1206,8 +1207,12 @@ class MainActivity : ComponentActivity() {
                     pixels[y * sampleWidth + x] = Color.argb(a, r, g, b)
                 }
             }
-            val raw = Bitmap.createBitmap(pixels, sampleWidth, sampleHeight, Bitmap.Config.ARGB_8888)
             val rotation = proxy.imageInfo.rotationDegrees
+            // Analysis owns a pixel copy now. Do not hold a camera buffer through
+            // depth inference/segmentation waits and stall still-image delivery.
+            proxy.close()
+            frameClosed = true
+            val raw = Bitmap.createBitmap(pixels, sampleWidth, sampleHeight, Bitmap.Config.ARGB_8888)
             val oriented = if (rotation != 0 || lensFacing == CameraSelector.LENS_FACING_FRONT) {
                 val transform = Matrix().apply {
                     postRotate(rotation.toFloat())
@@ -1279,7 +1284,7 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {
             styled?.takeIf { !it.isRecycled }?.recycle()
         } finally {
-            proxy.close()
+            if (!frameClosed) proxy.close()
             val processingNanos = System.nanoTime() - now
             // If CPU rendering is already missing its target interval, give the
             // camera and UI threads time between frames instead of running the

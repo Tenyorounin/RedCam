@@ -9,6 +9,8 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** On-device monocular relative-depth inference. It estimates ordering, not metric distance. */
 internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
@@ -18,6 +20,9 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
     private val session: OrtSession
     private val inputName: String
 
+    // Preview and saved photos share the session and scratch buffers. FIFO lock
+    // admission prevents repeated preview inference overtaking a waiting photo.
+    private val inferenceLock = ReentrantLock(true)
     private val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
     private val tensorBytes = ByteBuffer.allocateDirect(pixels.size * 3).order(ByteOrder.nativeOrder())
 
@@ -29,8 +34,7 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
         inputName = session.inputNames.first()
     }
 
-    @Synchronized
-    fun estimate(bitmap: Bitmap): DepthMap {
+    fun estimate(bitmap: Bitmap): DepthMap = inferenceLock.withLock {
         val input = if (bitmap.width == INPUT_SIZE && bitmap.height == INPUT_SIZE) bitmap
             else Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
         input.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
@@ -57,7 +61,7 @@ internal class RelativeDepthEstimator(context: Context) : AutoCloseable {
                 val values = FloatArray(mapWidth * mapHeight)
                 // The oriented bitmap and the model output both use row-major image coordinates.
                 for (i in values.indices) values[i] = (buffer.get().toInt() and 255) / 255f
-                return DepthMap(mapWidth, mapHeight, refineDepthEdges(values, mapWidth, mapHeight))
+                return@withLock DepthMap(mapWidth, mapHeight, refineDepthEdges(values, mapWidth, mapHeight))
             }
         }
     }
