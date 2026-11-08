@@ -169,7 +169,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var modeRow: LinearLayout
     private var landscapeModePanel: LinearLayout? = null
     private var landscapeControlSpacer: View? = null
-    private lateinit var lensGrip: View
     private val modeSeparators = mutableListOf<TextView>()
     private lateinit var finishRow: LinearLayout
     private lateinit var captureControls: LinearLayout
@@ -363,29 +362,6 @@ class MainActivity : ComponentActivity() {
             modeRow.addView(item)
         }
         bottom.addView(modeRow)
-        lensGrip = object : View(this) {
-            private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-            override fun onDraw(canvas: Canvas) {
-                super.onDraw(canvas)
-                val inset = dp(2).toFloat()
-                val bottom = height - inset
-                paint.shader = android.graphics.LinearGradient(0f, inset, 0f, bottom,
-                    intArrayOf(0xff484b50.toInt(), 0xff17191c.toInt(), 0xff090a0c.toInt()),
-                    null, android.graphics.Shader.TileMode.CLAMP)
-                canvas.drawRoundRect(inset, inset, width - inset, bottom, dp(3).toFloat(), dp(3).toFloat(), paint)
-                paint.shader = null
-                // Closely spaced raised ribs echo a rubber lens focusing ring.
-                var x = dp(6).toFloat()
-                while (x < width - dp(5)) {
-                    paint.color = 0xff08090a.toInt()
-                    canvas.drawRect(x, inset + dp(2), x + dp(2), bottom - dp(2), paint)
-                    paint.color = 0xff55585d.toInt()
-                    canvas.drawRect(x, inset + dp(2), x + dp(1), bottom - dp(2), paint)
-                    x += dp(4).coerceAtLeast(1)
-                }
-            }
-        }.apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO }
-        bottom.addView(lensGrip, LinearLayout.LayoutParams(-1, dp(20)))
 
         finishRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1461,7 +1437,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (landscapeControlsActive != landscape) {
-            for (row in listOf(finishRow, modeRow, lensGrip, captureControls))
+            for (row in listOf(finishRow, modeRow, captureControls))
                 (row.parent as? ViewGroup)?.removeView(row)
             landscapeModePanel?.let { bottomPanel.removeView(it) }
             landscapeControlSpacer?.let { bottomPanel.removeView(it) }
@@ -1474,18 +1450,20 @@ class MainActivity : ComponentActivity() {
                     addView(android.widget.ScrollView(this@MainActivity).apply {
                         addView(modeRow)
                     }, LinearLayout.LayoutParams(-1, 0, 1f))
-                    addView(lensGrip, LinearLayout.LayoutParams(-1, dp(20)))
                 }
                 landscapeModePanel = upper
                 bottomPanel.addView(upper, 0, LinearLayout.LayoutParams(-1, 0, 1f))
                 bottomPanel.addView(captureControls, 1, LinearLayout.LayoutParams(-1, -2))
-                val spacer = View(this)
+                val spacer = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { topMargin = dp(8) })
+                }
                 landscapeControlSpacer = spacer
                 bottomPanel.addView(spacer, 2, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
                 bottomPanel.addView(modeRow, 0, LinearLayout.LayoutParams(-1, -2))
-                bottomPanel.addView(lensGrip, 1, LinearLayout.LayoutParams(-1, dp(20)))
-                bottomPanel.addView(captureControls, 2, LinearLayout.LayoutParams(-1, -2))
+                bottomPanel.addView(captureControls, 1, LinearLayout.LayoutParams(-1, -2))
             }
             for (view in listOf(thumbnailButton, moreButton, shutterButton))
                 (view.parent as? ViewGroup)?.removeView(view)
@@ -1497,7 +1475,6 @@ class MainActivity : ComponentActivity() {
                 landscapeActions.addView(thumbnailButton, LinearLayout.LayoutParams(dp(42), dp(42)).apply { bottomMargin = dp(8) })
                 landscapeActions.addView(moreButton, LinearLayout.LayoutParams(dp(64), dp(36)))
                 captureControls.addView(shutterButton, LinearLayout.LayoutParams(dp(58), dp(58)))
-                captureControls.addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { marginStart = dp(8) })
             } else {
                 // Equal-width side regions keep the shutter on the screen midline.
                 val left = LinearLayout(this).apply {
@@ -1529,7 +1506,6 @@ class MainActivity : ComponentActivity() {
         shutterButton.visibility = visibility
         thumbnailButton.visibility = visibility
         moreButton.visibility = visibility
-        lensGrip.visibility = if (cameraVisible) View.VISIBLE else View.GONE
     }
 
     private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {

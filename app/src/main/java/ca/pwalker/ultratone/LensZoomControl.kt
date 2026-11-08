@@ -20,6 +20,7 @@ import kotlin.math.ln
 class LensZoomControl(context: Context) : LinearLayout(context) {
     private val zoomLabel = TextView(context)
     private val slider = SeekBar(context)
+    private lateinit var gripTrack: View
     private lateinit var tickOverlay: View
     private lateinit var track: FrameLayout
     private var verticalLayout = false
@@ -50,9 +51,9 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
         addView(track, LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
         slider.apply {
             max = 1000
-            progressTintList = ColorStateList.valueOf(0xffffc857.toInt())
+            progressTintList = ColorStateList.valueOf(Color.TRANSPARENT)
             thumbTintList = ColorStateList.valueOf(0xffffd46f.toInt())
-            progressBackgroundTintList = ColorStateList.valueOf(0xff85858a.toInt())
+            progressBackgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
                     val ratio = ratioAt(progress)
@@ -75,14 +76,50 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                 }
             })
         }
+        gripTrack = object : View(context) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            override fun onDraw(canvas: Canvas) {
+                super.onDraw(canvas)
+                // Draw along the SeekBar's actual travel, also when rotated.
+                val saved = canvas.save()
+                val left: Float
+                val right: Float
+                if (verticalLayout) {
+                    canvas.translate(width / 2f, height / 2f)
+                    canvas.rotate(-90f)
+                    left = -slider.width / 2f + slider.paddingLeft
+                    right = slider.width / 2f - slider.paddingRight
+                } else {
+                    canvas.translate(0f, height / 2f)
+                    left = slider.left + slider.paddingLeft.toFloat()
+                    right = slider.right - slider.paddingRight.toFloat()
+                }
+                val halfHeight = dp(10).toFloat()
+                if (right > left) {
+                    paint.shader = android.graphics.LinearGradient(0f, -halfHeight, 0f, halfHeight,
+                        intArrayOf(0xff484b50.toInt(), 0xff17191c.toInt(), 0xff090a0c.toInt()),
+                        null, android.graphics.Shader.TileMode.CLAMP)
+                    canvas.drawRoundRect(left, -halfHeight, right, halfHeight, dp(3).toFloat(), dp(3).toFloat(), paint)
+                    paint.shader = null
+                    var x = left + dp(3)
+                    while (x < right - dp(2)) {
+                        paint.color = 0xff08090a.toInt()
+                        canvas.drawRect(x, -halfHeight + dp(2), x + dp(2), halfHeight - dp(2), paint)
+                        paint.color = 0xff686b70.toInt()
+                        canvas.drawRect(x, -halfHeight + dp(2), x + dp(1), halfHeight - dp(2), paint)
+                        x += dp(4).coerceAtLeast(1)
+                    }
+                }
+                canvas.restoreToCount(saved)
+            }
+        }.apply {
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        track.addView(gripTrack, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         track.addView(slider, FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         tickOverlay = object : View(context) {
-            private val minorTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.WHITE
-                strokeWidth = dp(1).toFloat()
-                strokeCap = Paint.Cap.ROUND
-                alpha = 205
-            }
             private val majorTickPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = 0xffffd052.toInt()
                 strokeWidth = dp(4).toFloat()
@@ -96,10 +133,6 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                     val travel = insetBottom - insetTop
                     if (travel <= 0f) return
                     val centerX = width / 2f
-                    for (progress in 0..slider.max step 50) {
-                        val y = insetBottom - travel * progress / slider.max
-                        canvas.drawLine(centerX - dp(3), y, centerX + dp(3), y, minorTickPaint)
-                    }
                     majorZoomStops.forEach { ratio ->
                         val y = insetBottom - travel * progressAt(ratio) / slider.max
                         canvas.drawLine(centerX - dp(10), y, centerX + dp(10), y, majorTickPaint)
@@ -110,10 +143,6 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                     val travel = right - left
                     if (travel <= 0f) return
                     val centerY = height / 2f
-                    for (progress in 0..slider.max step 50) {
-                        val x = left + travel * progress / slider.max
-                        canvas.drawLine(x, centerY - dp(3), x, centerY + dp(3), minorTickPaint)
-                    }
                     majorZoomStops.forEach { ratio ->
                         val x = left + travel * progressAt(ratio) / slider.max
                         canvas.drawLine(x, centerY - dp(10), x, centerY + dp(10), majorTickPaint)
@@ -166,6 +195,7 @@ class LensZoomControl(context: Context) : LinearLayout(context) {
                 slider.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
             }
         }
+        gripTrack.invalidate()
         tickOverlay.invalidate()
     }
 
