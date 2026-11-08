@@ -167,6 +167,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var nightCaptureIndicator: LinearLayout
     private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
+    private lateinit var modeScroll: android.widget.HorizontalScrollView
+    private lateinit var modeDial: SeekBar
     private var landscapeModePanel: LinearLayout? = null
     private var landscapeControlSpacer: View? = null
     private val modeSeparators = mutableListOf<TextView>()
@@ -361,7 +363,63 @@ class MainActivity : ComponentActivity() {
             modeButtons[mode] = item
             modeRow.addView(item)
         }
-        bottom.addView(modeRow)
+        modeScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            addView(modeRow)
+        }
+        bottom.addView(modeScroll)
+        modeDial = object : SeekBar(this) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            override fun onDraw(canvas: Canvas) {
+                val left = paddingLeft.toFloat()
+                val right = width - paddingRight.toFloat()
+                val top = height / 2f - dp(9)
+                val bottom = height / 2f + dp(9)
+                paint.shader = android.graphics.LinearGradient(0f, top, 0f, bottom,
+                    intArrayOf(0xff484b50.toInt(), 0xff17191c.toInt(), 0xff090a0c.toInt()),
+                    null, android.graphics.Shader.TileMode.CLAMP)
+                canvas.drawRoundRect(left, top, right, bottom, dp(3).toFloat(), dp(3).toFloat(), paint)
+                paint.shader = null
+                var x = left + dp(3)
+                while (x < right - dp(2)) {
+                    paint.color = 0xff08090a.toInt()
+                    canvas.drawRect(x, top + dp(2), x + dp(2), bottom - dp(2), paint)
+                    paint.color = 0xff686b70.toInt()
+                    canvas.drawRect(x, top + dp(2), x + dp(1), bottom - dp(2), paint)
+                    x += dp(4).coerceAtLeast(1)
+                }
+                super.onDraw(canvas)
+            }
+        }.apply {
+            max = ReferenceRenderer.Mode.values().lastIndex
+            progressTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            progressBackgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            thumb = GradientDrawable().apply {
+                setColor(0xffffd052.toInt())
+                setSize(dp(3), dp(24))
+                cornerRadius = dp(1).toFloat()
+            }
+            splitTrack = false
+            var dragging = false
+            fun commitMode() {
+                val index = progress.coerceIn(0, ReferenceRenderer.Mode.values().lastIndex)
+                val selected = ReferenceRenderer.Mode.values()[index]
+                if (selected != activeMode) selectMode(selected)
+                updateModeButtons()
+            }
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onStartTrackingTouch(bar: SeekBar?) { dragging = true }
+                override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (fromUser && !dragging) commitMode()
+                }
+                override fun onStopTrackingTouch(bar: SeekBar?) {
+                    dragging = false
+                    commitMode()
+                }
+            })
+        }
+        bottom.addView(modeDial, LinearLayout.LayoutParams(-1, dp(36)))
 
         finishRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1410,22 +1468,16 @@ class MainActivity : ComponentActivity() {
         if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
         bottomPanel.setPadding(dp(8), dp(7), dp(8), dp(6))
 
-        modeRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        modeRow.orientation = LinearLayout.HORIZONTAL
         modeRow.setPadding(0, dp(2), 0, dp(2))
         modeButtons.values.forEach { button ->
             button.setPadding(dp(3), dp(3), dp(3), dp(3))
-            button.textSize = if (landscape) 14f else 12f
-            button.layoutParams = LinearLayout.LayoutParams(
-                if (landscape) ViewGroup.LayoutParams.MATCH_PARENT else ViewGroup.LayoutParams.WRAP_CONTENT,
-                if (landscape) dp(26) else ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+            button.textSize = 12f
+            button.layoutParams = LinearLayout.LayoutParams(-2, -2)
         }
         modeSeparators.forEach { dot ->
-            dot.layoutParams = LinearLayout.LayoutParams(
-                if (landscape) ViewGroup.LayoutParams.MATCH_PARENT else dp(8),
-                if (landscape) dp(10) else ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            dot.textSize = if (landscape) 10f else 14f
+            dot.layoutParams = LinearLayout.LayoutParams(dp(8), -1)
+            dot.textSize = 14f
         }
         finishRow.orientation = LinearLayout.VERTICAL
         finishRow.setPadding(0, 0, 0, 0)
@@ -1437,7 +1489,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (landscapeControlsActive != landscape) {
-            for (row in listOf(finishRow, modeRow, captureControls))
+            for (row in listOf(finishRow, modeScroll, modeDial, captureControls))
                 (row.parent as? ViewGroup)?.removeView(row)
             landscapeModePanel?.let { bottomPanel.removeView(it) }
             landscapeControlSpacer?.let { bottomPanel.removeView(it) }
@@ -1447,9 +1499,9 @@ class MainActivity : ComponentActivity() {
                 // Equal regions above and below keep the shutter centred vertically.
                 val upper = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(android.widget.ScrollView(this@MainActivity).apply {
-                        addView(modeRow)
-                    }, LinearLayout.LayoutParams(-1, 0, 1f))
+                    gravity = Gravity.BOTTOM
+                    addView(modeScroll, LinearLayout.LayoutParams(-1, -2))
+                    addView(modeDial, LinearLayout.LayoutParams(-1, dp(36)))
                 }
                 landscapeModePanel = upper
                 bottomPanel.addView(upper, 0, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -1462,8 +1514,9 @@ class MainActivity : ComponentActivity() {
                 landscapeControlSpacer = spacer
                 bottomPanel.addView(spacer, 2, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
-                bottomPanel.addView(modeRow, 0, LinearLayout.LayoutParams(-1, -2))
-                bottomPanel.addView(captureControls, 1, LinearLayout.LayoutParams(-1, -2))
+                bottomPanel.addView(modeScroll, 0, LinearLayout.LayoutParams(-1, -2))
+                bottomPanel.addView(modeDial, 1, LinearLayout.LayoutParams(-1, dp(36)))
+                bottomPanel.addView(captureControls, 2, LinearLayout.LayoutParams(-1, -2))
             }
             for (view in listOf(thumbnailButton, moreButton, shutterButton))
                 (view.parent as? ViewGroup)?.removeView(view)
@@ -1651,6 +1704,15 @@ class MainActivity : ComponentActivity() {
 
     private fun updateModeButtons() {
         applyControlSizing()
+        if (::modeDial.isInitialized) {
+            modeDial.progress = activeMode.ordinal
+            modeDial.contentDescription = "Camera mode, ${modeName(activeMode)}. Swipe to change mode"
+            modeScroll.post {
+                modeButtons[activeMode]?.let { selected ->
+                    modeScroll.smoothScrollTo((selected.left + selected.width / 2 - modeScroll.width / 2).coerceAtLeast(0), 0)
+                }
+            }
+        }
         modeButtons.forEach { (mode, button) ->
             val selected = mode == activeMode
             button.setTextColor(if (selected) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
