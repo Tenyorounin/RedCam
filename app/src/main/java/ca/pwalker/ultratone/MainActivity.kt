@@ -668,6 +668,12 @@ class MainActivity : ComponentActivity() {
 
     private fun applyCameraControlLayout(landscape: Boolean) {
         if (!::zoomRow.isInitialized || !::bottomPanel.isInitialized || !::landscapeActions.isInitialized) return
+        // Lower portrait framing by 24dp to clear the zoom rail. Keep all
+        // preview surfaces aligned; focus and Polaroid feedback use their coordinates.
+        val previewOffset = -dp(if (landscape) 42 else 18).toFloat()
+        previewView.translationY = previewOffset
+        processedPreviewView.translationY = previewOffset
+        imageView.translationY = previewOffset
         zoomRow.setVertical(landscape)
         landscapeActions.visibility = if (landscape) View.VISIBLE else View.GONE
         zoomRow.layoutParams = if (landscape) {
@@ -1504,6 +1510,10 @@ class MainActivity : ComponentActivity() {
                 // Equal regions above and below keep the shutter centred vertically.
                 val upper = LinearLayout(this).apply {
                     orientation = LinearLayout.HORIZONTAL
+                    // Reserve a clear gap above the shutter within this region,
+                    // so scrolling labels and the dial stop before the capture row.
+                    setPadding(0, 0, 0, dp(16))
+                    clipToPadding = true
                     verticalModeScroll.addView(modeRow)
                     addView(verticalModeScroll, LinearLayout.LayoutParams(0, -1, 1f))
                     // Rotate the real SeekBar so drawing, dragging and accessibility
