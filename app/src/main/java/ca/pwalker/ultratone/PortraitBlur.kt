@@ -17,6 +17,8 @@ import kotlin.math.roundToInt
 
 /** Relative-depth background blur, with person segmentation to help preserve subject edges. */
 object PortraitBlur {
+    const val RINGS = 3
+
     private data class Highlight(val x: Int, val y: Int, val color: Int, val strength: Float, val blur: Float)
     private val linearChannel = FloatArray(256) { value ->
         val encoded = value / 255f
@@ -329,6 +331,7 @@ object PortraitBlur {
                     if (person > 0.65f) subjectPixels++
                     blurAmount *= 1f - person
                 }
+                if (bokehLevel == RINGS) blurAmount *= Color.alpha(bgRow[x]) / 255f
                 if (blurAmount > 0.002f) row[x] = mix(row[x], bgRow[x], blurAmount)
             }
             output.setPixels(row, 0, source.width, 0, y, source.width, 1)
@@ -383,6 +386,16 @@ object PortraitBlur {
             backgroundEligible[center] = amount > 0.04f && person < 0.18f
         }
         val highlights = findBackgroundHighlights(input, width, height, blurAmounts, backgroundEligible)
+
+        if (bokehLevel == RINGS) {
+            // Keep the full-resolution source untouched outside the light discs.
+            // Only this transparent overlay is upscaled, never the source image.
+            val overlay = IntArray(input.size)
+            renderHighlightDiscs(overlay, width, height, blurAmounts, backgroundEligible, highlights, maxRadius, bokehLevel)
+            val bitmap = Bitmap.createBitmap(overlay, width, height, Bitmap.Config.ARGB_8888)
+            return if (width == source.width && height == source.height) bitmap
+                else Bitmap.createScaledBitmap(bitmap, source.width, source.height, true).also { bitmap.recycle() }
+        }
 
         // Dr.Bokeh's layered representation needs RGB behind foreground edges. Fill
         // those pixels from the exact nearest farther-background pixel, bounded by the
@@ -540,7 +553,18 @@ object PortraitBlur {
                 val edge = 1f - smoothstep(((normalized - 0.70f) / 0.30f).coerceIn(0f, 1f))
                 val amountScale = (blurAmounts[index] / highlight.blur).coerceIn(0f, 1f)
                 val alpha = (highlight.strength * opacity * edge * amountScale).coerceIn(0f, 0.62f)
-                if (alpha > 0.002f) pixels[index] = mix(pixels[index], highlight.color, alpha)
+                if (alpha > 0.002f) {
+                    if (bokehLevel == RINGS) {
+                        val previous = pixels[index]
+                        val retained = Color.alpha(previous) / 255f * (1f - alpha)
+                        val combined = alpha + retained
+                        fun channel(old: Int, light: Int) = ((old * retained + light * alpha) / combined).roundToInt().coerceIn(0, 255)
+                        pixels[index] = Color.argb((combined * 255f).roundToInt(),
+                            channel(Color.red(previous), Color.red(highlight.color)),
+                            channel(Color.green(previous), Color.green(highlight.color)),
+                            channel(Color.blue(previous), Color.blue(highlight.color)))
+                    } else pixels[index] = mix(pixels[index], highlight.color, alpha)
+                }
             }
         }
     }

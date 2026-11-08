@@ -224,7 +224,7 @@ class MainActivity : ComponentActivity() {
         analysisExecutor = Executors.newSingleThreadExecutor()
         photoProcessingExecutor = Executors.newSingleThreadExecutor()
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
-        bokehLevel = getPreferences(MODE_PRIVATE).getInt("bokeh_level", 0).coerceIn(0, 2)
+        bokehLevel = getPreferences(MODE_PRIVATE).getInt("bokeh_level", 0).coerceIn(0, 3)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
         infinityFocusEnabled = getPreferences(MODE_PRIVATE).getBoolean("infinity_focus_enabled", false)
         glowEnabled = getPreferences(MODE_PRIVATE).getBoolean("effect_glow", false)
@@ -1372,7 +1372,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateLiveLook() {
-        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects())
+        liveCameraEffect?.setLook(activeMode, activeFinish, styleStrength, currentZoomRatio, nightEnhancementEnabled, infinityFocusEnabled, currentEffects(), bokehLevel == PortraitBlur.RINGS)
     }
 
     private fun updateFinishButtons() {
@@ -1494,7 +1494,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cycleBokeh() {
-        bokehLevel = (bokehLevel + 1) % 3
+        bokehLevel = (bokehLevel + 1) % 4
         getPreferences(MODE_PRIVATE).edit().putInt("bokeh_level", bokehLevel).apply()
         updateBokehButton()
         updateLiveLook()
@@ -1510,9 +1510,10 @@ class MainActivity : ComponentActivity() {
         bokehButton.contentDescription = "Bokeh strength, $label. Tap to cycle."
     }
 
-    private fun bokehLabel(level: Int) = when (level.coerceIn(0, 2)) {
+    private fun bokehLabel(level: Int) = when (level.coerceIn(0, 3)) {
         1 -> "Extra"
         2 -> "Max"
+        3 -> "Rings"
         else -> "Normal"
     }
 

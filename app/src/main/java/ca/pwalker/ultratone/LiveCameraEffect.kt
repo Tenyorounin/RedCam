@@ -29,6 +29,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         shader.setIntUniform("mode", 0)
         shader.setIntUniform("monochrome", 0)
         shader.setIntUniform("depthEnabled", 0)
+        shader.setIntUniform("ringsOnly", 0)
         shader.setIntUniform("glowEnabled", 0)
         shader.setIntUniform("vignetteEnabled", 0)
         shader.setFloatUniform("viewSize", 1f, 1f)
@@ -39,11 +40,12 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
         view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(shader, "cameraImage"))
     }
 
-    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects()) {
+    fun setLook(mode: ReferenceRenderer.Mode, finish: ReferenceRenderer.Finish, strength: Float, zoom: Float, nightEnhancement: Boolean = false, infinityFocus: Boolean = false, effects: ReferenceRenderer.Effects = ReferenceRenderer.Effects(), ringsOnly: Boolean = false) {
         if (this.mode != mode && mode == ReferenceRenderer.Mode.CLOSE_UP) {
             // Never apply a depth map from the scene that was visible before this mode switch.
             hasFreshDepthGuide = false
         }
+        shader.setIntUniform("ringsOnly", if (ringsOnly) 1 else 0)
         this.mode = mode
         this.infinityFocus = infinityFocus
 
@@ -154,6 +156,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
             uniform int monochrome;
             uniform int nightEnhancement;
             uniform int depthEnabled;
+            uniform int ringsOnly;
             uniform int glowEnabled;
             uniform int vignetteEnabled;
             uniform float2 viewSize;
@@ -235,7 +238,11 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     float blur = smoothstep(0.12, 0.50, separation);
                     blur = blur * blur * 0.88;
                     blur *= 1.0 - person;
-                    if (blur > 0.002) {
+                    if (blur > 0.002 && ringsOnly == 1) {
+                        float4 light = circles.eval(dp);
+                        rgb = rgb * (1.0 - light.a * blur) + light.rgb * blur;
+                    }
+                    if (blur > 0.002 && ringsOnly == 0) {
                         // Gather RGB from inside a soft-edged circular aperture. Each
                         // tap is checked against its own depth so near/focused detail
                         // cannot bleed into the defocused background. Bright source
