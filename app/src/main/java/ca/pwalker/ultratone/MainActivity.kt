@@ -1538,7 +1538,7 @@ class MainActivity : ComponentActivity() {
                 val spacer = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                    addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { topMargin = dp(8) })
+                    addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { topMargin = dp(20) })
                 }
                 landscapeControlSpacer = spacer
                 bottomPanel.addView(spacer, 2, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -1567,7 +1567,8 @@ class MainActivity : ComponentActivity() {
                 }
                 val right = LinearLayout(this).apply {
                     gravity = Gravity.CENTER_VERTICAL
-                    addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { marginStart = dp(8) })
+                    addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+                    addView(finishRow, LinearLayout.LayoutParams(dp(60), -2))
                     addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
                     addView(moreButton, LinearLayout.LayoutParams(dp(54), dp(36)))
                 }
