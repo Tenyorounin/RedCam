@@ -168,6 +168,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var bottomPanel: LinearLayout
     private lateinit var modeRow: LinearLayout
     private lateinit var modeScroll: android.widget.HorizontalScrollView
+    private lateinit var verticalModeScroll: android.widget.ScrollView
     private lateinit var modeDial: SeekBar
     private var landscapeModePanel: LinearLayout? = null
     private var landscapeControlSpacer: View? = null
@@ -367,6 +368,10 @@ class MainActivity : ComponentActivity() {
             isHorizontalScrollBarEnabled = false
             isFillViewport = true
             addView(modeRow)
+        }
+        verticalModeScroll = android.widget.ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            isFillViewport = true
         }
         bottom.addView(modeScroll)
         modeDial = object : SeekBar(this) {
@@ -1468,16 +1473,16 @@ class MainActivity : ComponentActivity() {
         if (!::bottomPanel.isInitialized || !::modeRow.isInitialized || !::finishRow.isInitialized || !::captureControls.isInitialized) return
         bottomPanel.setPadding(dp(8), dp(7), dp(8), dp(6))
 
-        modeRow.orientation = LinearLayout.HORIZONTAL
+        modeRow.orientation = if (landscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
         modeRow.setPadding(0, dp(2), 0, dp(2))
         modeButtons.values.forEach { button ->
             button.setPadding(dp(3), dp(3), dp(3), dp(3))
             button.textSize = 12f
-            button.layoutParams = LinearLayout.LayoutParams(-2, -2)
+            button.layoutParams = LinearLayout.LayoutParams(if (landscape) -1 else -2, if (landscape) dp(28) else -2)
         }
         modeSeparators.forEach { dot ->
-            dot.layoutParams = LinearLayout.LayoutParams(dp(8), -1)
-            dot.textSize = 14f
+            dot.layoutParams = LinearLayout.LayoutParams(if (landscape) -1 else dp(8), if (landscape) dp(10) else -1)
+            dot.textSize = if (landscape) 10f else 14f
         }
         finishRow.orientation = LinearLayout.VERTICAL
         finishRow.setPadding(0, 0, 0, 0)
@@ -1489,7 +1494,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (landscapeControlsActive != landscape) {
-            for (row in listOf(finishRow, modeScroll, modeDial, captureControls))
+            for (row in listOf(finishRow, modeRow, modeScroll, verticalModeScroll, modeDial, captureControls))
                 (row.parent as? ViewGroup)?.removeView(row)
             landscapeModePanel?.let { bottomPanel.removeView(it) }
             landscapeControlSpacer?.let { bottomPanel.removeView(it) }
@@ -1498,10 +1503,24 @@ class MainActivity : ComponentActivity() {
             if (landscape) {
                 // Equal regions above and below keep the shutter centred vertically.
                 val upper = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.BOTTOM
-                    addView(modeScroll, LinearLayout.LayoutParams(-1, -2))
-                    addView(modeDial, LinearLayout.LayoutParams(-1, dp(36)))
+                    orientation = LinearLayout.HORIZONTAL
+                    verticalModeScroll.addView(modeRow)
+                    addView(verticalModeScroll, LinearLayout.LayoutParams(0, -1, 1f))
+                    // Rotate the real SeekBar so drawing, dragging and accessibility
+                    // share the same range. Positive rotation puts the first mode at top.
+                    modeDial.rotation = 90f
+                    val dialHost = FrameLayout(this@MainActivity).apply {
+                        addView(modeDial, FrameLayout.LayoutParams(0, dp(32), Gravity.CENTER))
+                        addOnLayoutChangeListener { host, _, _, _, _, _, _, _, _ ->
+                            if (modeDial.parent === host && host.height > 0) {
+                                val lp = modeDial.layoutParams as FrameLayout.LayoutParams
+                                if (lp.width != host.height || lp.height != host.width) {
+                                    modeDial.layoutParams = FrameLayout.LayoutParams(host.height, host.width, Gravity.CENTER)
+                                }
+                            }
+                        }
+                    }
+                    addView(dialHost, LinearLayout.LayoutParams(dp(32), -1))
                 }
                 landscapeModePanel = upper
                 bottomPanel.addView(upper, 0, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -1514,6 +1533,8 @@ class MainActivity : ComponentActivity() {
                 landscapeControlSpacer = spacer
                 bottomPanel.addView(spacer, 2, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
+                modeScroll.addView(modeRow)
+                modeDial.rotation = 0f
                 bottomPanel.addView(modeScroll, 0, LinearLayout.LayoutParams(-1, -2))
                 bottomPanel.addView(modeDial, 1, LinearLayout.LayoutParams(-1, dp(36)))
                 bottomPanel.addView(captureControls, 2, LinearLayout.LayoutParams(-1, -2))
@@ -1707,9 +1728,15 @@ class MainActivity : ComponentActivity() {
         if (::modeDial.isInitialized) {
             modeDial.progress = activeMode.ordinal
             modeDial.contentDescription = "Camera mode, ${modeName(activeMode)}. Swipe to change mode"
-            modeScroll.post {
+            modeRow.post {
                 modeButtons[activeMode]?.let { selected ->
-                    modeScroll.smoothScrollTo((selected.left + selected.width / 2 - modeScroll.width / 2).coerceAtLeast(0), 0)
+                    if (landscapeControlsActive == true) {
+                        verticalModeScroll.smoothScrollTo(0,
+                            (selected.top + selected.height / 2 - verticalModeScroll.height / 2).coerceAtLeast(0))
+                    } else {
+                        modeScroll.smoothScrollTo(
+                            (selected.left + selected.width / 2 - modeScroll.width / 2).coerceAtLeast(0), 0)
+                    }
                 }
             }
         }
