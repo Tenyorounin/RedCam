@@ -42,12 +42,12 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
 
       - name: Name UltraTone APK
-        run: cp app/build/outputs/apk/debug/app-arm64-v8a-debug.apk app/build/outputs/apk/debug/UltraTone-arm64-v8a-debug.apk
+        run: cp app/build/outputs/apk/debug/app-arm64-v8a-debug.apk "app/build/outputs/apk/debug/UltraTone-${GITHUB_RUN_NUMBER}-arm64-v8a-debug.apk"
 
       - name: Save APK for download
         uses: actions/upload-artifact@v4
         with:
-          name: UltraTone-arm64-debug-apk
-          path: app/build/outputs/apk/debug/UltraTone-arm64-v8a-debug.apk
+          name: UltraTone-build-${{ github.run_number }}-arm64-debug-apk
+          path: app/build/outputs/apk/debug/UltraTone-${{ github.run_number }}-arm64-v8a-debug.apk
           if-no-files-found: error
           retention-days: 14
