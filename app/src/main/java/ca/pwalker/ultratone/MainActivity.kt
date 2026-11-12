@@ -98,6 +98,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var bokehLevel = 0
     @Volatile private var nightEnhancementEnabled = false
     @Volatile private var infinityFocusEnabled = false
+    private var macroFocusEnabled = false
     @Volatile private var sculptEnabled = false
     @Volatile private var glowEnabled = false
     private lateinit var moreMenuPanel: LinearLayout
@@ -876,18 +877,47 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun macroCameraId(): String? {
+        if (lensFacing != CameraSelector.LENS_FACING_BACK || android.os.Build.VERSION.SDK_INT < 28) return null
+        return try {
+            val provider = cameraProvider ?: return null
+            val selector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+            val logicalId = Camera2CameraInfo.from(provider.getCameraInfo(selector)).cameraId
+            val manager = getSystemService(android.hardware.camera2.CameraManager::class.java)
+            val logical = manager.getCameraCharacteristics(logicalId)
+            // Diopters increase as the nearest focus distance gets closer. Require
+            // autofocus and a reported near limit of 10cm or less, not just a wide lens.
+            logical.physicalCameraIds.mapNotNull { id ->
+                val info = manager.getCameraCharacteristics(id)
+                val near = info.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+                val af = info.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES)
+                if (near >= 10f && af?.contains(CaptureRequest.CONTROL_AF_MODE_AUTO) == true) id to near else null
+            }.maxByOrNull { it.second }?.first
+        } catch (_: Exception) { null }
+    }
+
     private fun toggleInfinityFocus() {
-        if (!infinityFocusSupported) {
-            message("Infinity focus is not supported by this camera.")
-            return
+        if (isBusy || longExposureHoldActive) return
+        val wasMacro = macroFocusEnabled
+        when {
+            macroFocusEnabled -> { macroFocusEnabled = false; infinityFocusEnabled = false }
+            infinityFocusEnabled -> {
+                infinityFocusEnabled = false
+                macroFocusEnabled = macroCameraId() != null
+                if (!macroFocusEnabled) message("No supported close-focusing camera is exposed; using AF.")
+            }
+            infinityFocusSupported -> infinityFocusEnabled = true
+            else -> {
+                macroFocusEnabled = macroCameraId() != null
+                if (!macroFocusEnabled) message("Infinity and Macro are not supported by this camera.")
+            }
         }
-        if (isBusy) return
-        infinityFocusEnabled = !infinityFocusEnabled
         getPreferences(MODE_PRIVATE).edit().putBoolean("infinity_focus_enabled", infinityFocusEnabled).apply()
         focusIndicator.visibility = View.GONE
         updateInfinityFocusButton()
         updateLiveLook()
-        if (activeMode == ReferenceRenderer.Mode.CLOSE_UP) bindCamera()
+        if (wasMacro != macroFocusEnabled || activeMode == ReferenceRenderer.Mode.CLOSE_UP) requestCameraRebind()
         else applyInfinityFocus(infinityFocusEnabled)
     }
 
@@ -930,17 +960,21 @@ class MainActivity : ComponentActivity() {
 
     private fun updateInfinityFocusButton() {
         if (!::infinityFocusButton.isInitialized) return
-        infinityFocusButton.text = if (infinityFocusEnabled) "∞" else "AF"
-        infinityFocusButton.isEnabled = infinityFocusSupported
-        infinityFocusButton.alpha = if (infinityFocusSupported) 1f else 0.45f
-        infinityFocusButton.setTextColor(if (infinityFocusEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
-        infinityFocusButton.contentDescription = if (infinityFocusEnabled)
-            "Infinity focus enabled; tap to restore autofocus. Bokeh blur is disabled."
-        else "Autofocus enabled; tap to lock focus at infinity and disable blur."
+        infinityFocusButton.text = when { macroFocusEnabled -> "Macro"; infinityFocusEnabled -> "∞"; else -> "AF" }
+        infinityFocusButton.textSize = if (macroFocusEnabled) 11f else 14f
+        infinityFocusButton.isEnabled = true
+        infinityFocusButton.alpha = 1f
+        infinityFocusButton.setTextColor(if (infinityFocusEnabled || macroFocusEnabled) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+        infinityFocusButton.contentDescription = when {
+            macroFocusEnabled -> "Macro camera with autofocus; tap to return to Auto focus"
+            infinityFocusEnabled -> "Infinity focus; tap for Macro. Bokeh blur is disabled."
+            else -> "Auto focus; tap for Infinity, then Macro"
+        }
     }
 
     private fun applySelectedFocus() {
         when {
+            macroFocusEnabled -> applyManualLensFocus(null)
             infinityFocusEnabled -> applyManualLensFocus(0f)
             activeMode == ReferenceRenderer.Mode.LANDSCAPE && landscapeFocusDistance != null ->
                 applyManualLensFocus(landscapeFocusDistance)
@@ -1029,6 +1063,12 @@ class MainActivity : ComponentActivity() {
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         zoomObserver = null
         val baseSelector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
+        val macroId = if (macroFocusEnabled) macroCameraId() else null
+        if (macroFocusEnabled && macroId == null) {
+            macroFocusEnabled = false
+            updateInfinityFocusButton()
+            message("Macro camera unavailable; using AF.")
+        }
         val extension = when (activeMode) {
             ReferenceRenderer.Mode.DAY -> null
             ReferenceRenderer.Mode.NIGHT -> ExtensionMode.NIGHT
@@ -1039,7 +1079,7 @@ class MainActivity : ComponentActivity() {
         }
         var selector = baseSelector
         var usingExtension = false
-        if (extension != null && lensFacing == CameraSelector.LENS_FACING_BACK && flashMode == ImageCapture.FLASH_MODE_OFF) {
+        if (macroId == null && extension != null && lensFacing == CameraSelector.LENS_FACING_BACK && flashMode == ImageCapture.FLASH_MODE_OFF) {
             try {
                 val manager = extensionsManager
                 if (manager != null && manager.isExtensionAvailable(baseSelector, extension)) {
@@ -1054,7 +1094,8 @@ class MainActivity : ComponentActivity() {
             // rejected and replaced by our software fallback.
             fun newPreview(): Preview {
                 val builder = Preview.Builder().setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                if (activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
+                macroId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) }
+                if (macroId == null && activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled) {
                     val id = Camera2CameraInfo.from(provider.getCameraInfo(baseSelector)).cameraId
                     if (id !in rejectedDepthCameras) {
                         runCatching {
@@ -1083,6 +1124,7 @@ class MainActivity : ComponentActivity() {
                     .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                     .setCaptureMode(mode)
                     .setFlashMode(if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) ImageCapture.FLASH_MODE_OFF else flashMode)
+                macroId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) }
                 if (activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.CLOSE_UP) builder.setJpegQuality(100)
                 return builder.build()
             }
@@ -1090,6 +1132,7 @@ class MainActivity : ComponentActivity() {
                 .setTargetResolution(Size(320, 240))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                .also { builder -> macroId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) } }
                 .build()
 
             provider.unbindAll()
@@ -1119,6 +1162,7 @@ class MainActivity : ComponentActivity() {
                 // Prioritize response in Day and Bokeh modes. The software night burst
                 // uses ZSL when flash is off; CameraX falls back if unsupported.
                 val baseCaptureMode = when {
+                    macroId != null -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     activeMode == ReferenceRenderer.Mode.DAY || activeMode == ReferenceRenderer.Mode.CLOSE_UP || activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE -> ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     activeMode != ReferenceRenderer.Mode.NIGHT -> ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
                     flashMode == ImageCapture.FLASH_MODE_OFF -> ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG
@@ -1177,6 +1221,13 @@ class MainActivity : ComponentActivity() {
             observeZoom()
             updateStatus()
         } catch (e: Exception) {
+            if (macroFocusEnabled) {
+                macroFocusEnabled = false
+                updateInfinityFocusButton()
+                bindCamera()
+                message("Macro camera could not be opened; restored AF.")
+                return
+            }
             message("Could not configure camera: ${e.localizedMessage ?: "unsupported configuration"}")
         }
     }
