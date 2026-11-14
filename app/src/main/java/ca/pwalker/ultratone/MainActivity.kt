@@ -161,6 +161,9 @@ class MainActivity : ComponentActivity() {
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
     private lateinit var flashButton: TextView
+    private lateinit var switchCameraButton: TextView
+    private val thumbnailExecutor = Executors.newSingleThreadExecutor()
+    private var thumbnailGeneration = 0
     private lateinit var infinityFocusButton: TextView
     private lateinit var shutterButton: ImageButton
     private lateinit var thumbnailButton: ImageButton
@@ -320,7 +323,9 @@ class MainActivity : ComponentActivity() {
         topBar.addView(status, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
             marginStart = dp(12); marginEnd = dp(12)
         })
-        topBar.addView(pill("↻") { switchCamera() }, LinearLayout.LayoutParams(dp(42), dp(36)))
+        switchCameraButton = pill("↻") { switchCamera() }.apply {
+            contentDescription = "Switch between front and rear camera"
+        }
         overlay.addView(topBar, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP))
         zoomRow = LensZoomControl(this).apply {
             onZoomChanged = ::selectZoom
@@ -417,7 +422,10 @@ class MainActivity : ComponentActivity() {
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(bar: SeekBar?) { dragging = true }
                 override fun onProgressChanged(bar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser && !dragging) commitMode()
+                    if (fromUser) {
+                        highlightMode(ReferenceRenderer.Mode.values()[progress])
+                        if (!dragging) commitMode()
+                    }
                 }
                 override fun onStopTrackingTouch(bar: SeekBar?) {
                     dragging = false
@@ -675,6 +683,10 @@ class MainActivity : ComponentActivity() {
         previewView.translationY = previewOffset
         processedPreviewView.translationY = previewOffset
         imageView.translationY = previewOffset
+        (topBar.layoutParams as FrameLayout.LayoutParams).apply {
+            marginEnd = if (landscape) 0 else dp(54)
+            topBar.layoutParams = this
+        }
         zoomRow.setVertical(landscape)
         landscapeActions.visibility = if (landscape) View.VISIBLE else View.GONE
         zoomRow.layoutParams = if (landscape) {
@@ -1551,7 +1563,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (landscapeControlsActive != landscape) {
-            for (row in listOf(finishRow, modeRow, modeScroll, verticalModeScroll, modeDial, captureControls))
+            for (row in listOf(finishRow, modeRow, modeScroll, verticalModeScroll, modeDial, captureControls, switchCameraButton))
                 (row.parent as? ViewGroup)?.removeView(row)
             landscapeModePanel?.let { bottomPanel.removeView(it) }
             landscapeControlSpacer?.let { bottomPanel.removeView(it) }
@@ -1590,10 +1602,12 @@ class MainActivity : ComponentActivity() {
                     orientation = LinearLayout.VERTICAL
                     gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                     addView(finishRow, LinearLayout.LayoutParams(dp(60), -2).apply { topMargin = dp(20) })
+                    addView(switchCameraButton, LinearLayout.LayoutParams(dp(42), dp(36)).apply { topMargin = dp(8) })
                 }
                 landscapeControlSpacer = spacer
                 bottomPanel.addView(spacer, 2, LinearLayout.LayoutParams(-1, 0, 1f))
             } else {
+                controlOverlay.addView(switchCameraButton, FrameLayout.LayoutParams(dp(42), dp(36), Gravity.TOP or Gravity.END))
                 modeScroll.addView(modeRow)
                 modeDial.rotation = 0f
                 bottomPanel.addView(modeScroll, 0, LinearLayout.LayoutParams(-1, -2))
@@ -1642,6 +1656,7 @@ class MainActivity : ComponentActivity() {
         shutterButton.visibility = visibility
         thumbnailButton.visibility = visibility
         moreButton.visibility = visibility
+        switchCameraButton.visibility = visibility
     }
 
     private fun resizeControl(view: View?, widthDp: Int, heightDp: Int) {
@@ -1790,29 +1805,30 @@ class MainActivity : ComponentActivity() {
         if (::modeDial.isInitialized) {
             modeDial.progress = activeMode.ordinal
             modeDial.contentDescription = "Camera mode, ${modeName(activeMode)}. Swipe to change mode"
-            modeRow.post {
-                modeButtons[activeMode]?.let { selected ->
-                    if (landscapeControlsActive == true) {
-                        verticalModeScroll.smoothScrollTo(0,
-                            (selected.top + selected.height / 2 - verticalModeScroll.height / 2).coerceAtLeast(0))
-                    } else {
-                        modeScroll.smoothScrollTo(
-                            (selected.left + selected.width / 2 - modeScroll.width / 2).coerceAtLeast(0), 0)
-                    }
-                }
-            }
         }
-        modeButtons.forEach { (mode, button) ->
-            val selected = mode == activeMode
-            button.setTextColor(if (selected) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
-            button.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
-            button.alpha = if (selected) 1f else 0.72f
-        }
+        highlightMode(activeMode)
         if (::shutterButton.isInitialized) {
             shutterButton.contentDescription = if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
                 "Hold shutter to capture a longer exposure; release to save"
             } else {
                 "Take photo with the selected ${if (activeFinish == ReferenceRenderer.Finish.COLOUR) "colour" else "black and white"} style"
+            }
+        }
+    }
+
+    private fun highlightMode(modeToHighlight: ReferenceRenderer.Mode) {
+        modeButtons.forEach { (mode, button) ->
+            val selected = mode == modeToHighlight
+            button.setTextColor(if (selected) 0xffffd28c.toInt() else 0xfff2f2f4.toInt())
+            button.setTypeface(null, if (selected) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+            button.alpha = if (selected) 1f else 0.72f
+        }
+        modeRow.post {
+            modeButtons[modeToHighlight]?.let { selected ->
+                if (landscapeControlsActive == true) verticalModeScroll.smoothScrollTo(0,
+                    (selected.top + selected.height / 2 - verticalModeScroll.height / 2).coerceAtLeast(0))
+                else modeScroll.smoothScrollTo(
+                    (selected.left + selected.width / 2 - modeScroll.width / 2).coerceAtLeast(0), 0)
             }
         }
     }
@@ -2424,8 +2440,41 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateThumbnail(bitmap: Bitmap) {
+        thumbnailGeneration++
         val thumb = android.media.ThumbnailUtils.extractThumbnail(bitmap, 80, 80)
         thumbnailButton.setImageBitmap(thumb)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!::thumbnailButton.isInitialized) return
+        val generation = ++thumbnailGeneration
+        thumbnailExecutor.execute {
+            val result = runCatching {
+                val modern = android.os.Build.VERSION.SDK_INT >= 29
+                val filter = if (modern) "relative_path IN (?, ?) AND is_pending = 0" else "_display_name LIKE ?"
+                val args = if (modern) arrayOf("Pictures/UltraTone/", "Pictures/UltraTone") else arrayOf("UltraTone-%.jpg")
+                contentResolver.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, arrayOf("_id"),
+                    filter, args, "date_added DESC, _id DESC")?.use { rows ->
+                    if (!rows.moveToFirst()) null else {
+                        val id = rows.getLong(0)
+                        val uri = android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                        val bitmap = if (modern) contentResolver.loadThumbnail(uri, Size(80, 80), null)
+                        else @Suppress("DEPRECATION") MediaStore.Images.Thumbnails.getThumbnail(
+                            contentResolver, id, MediaStore.Images.Thumbnails.MINI_KIND, null)
+                        uri to bitmap
+                    }
+                }
+            }
+            runOnUiThread {
+                if (!isDestroyed && generation == thumbnailGeneration && result.isSuccess) {
+                    lastPhotoUri = result.getOrNull()?.first
+                    val bitmap = result.getOrNull()?.second
+                    if (bitmap != null) thumbnailButton.setImageBitmap(bitmap)
+                    else thumbnailButton.setImageResource(android.R.drawable.ic_menu_gallery)
+                }
+            }
+        }
     }
 
     private fun loadUri(uri: Uri) {
@@ -2632,6 +2681,7 @@ class MainActivity : ComponentActivity() {
         zoomObserver?.let { boundCamera?.cameraInfo?.zoomState?.removeObserver(it) }
         liveCameraEffect?.close()
         liveCameraEffect = null
+        thumbnailExecutor.shutdown()
         cameraExecutor.shutdown()
         photoProcessingExecutor.shutdown()
         analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }

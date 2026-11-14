@@ -39,8 +39,8 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 57
-        versionName = "0.5.22"
+        versionCode = 58
+        versionName = "0.5.23"
     }
 
     // Shared debug signing keeps GitHub Actions APKs installable as updates.
