@@ -315,7 +315,7 @@ internal class LiveCameraEffect private constructor(private val view: PreviewVie
                     );
                     if (glowEnabled == 1) {
                         float bloom = smoothstep(0.68, 0.97, halo) * 0.075;
-                        result += float3(bloom, bloom * 0.98, bloom * 0.92);
+                        result += monochrome == 1 ? float3(bloom) : float3(bloom, bloom * 0.98, bloom * 0.92);
                     }
                 }
                 if (vignetteEnabled == 1) {

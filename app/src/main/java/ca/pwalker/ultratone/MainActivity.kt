@@ -160,7 +160,20 @@ class MainActivity : ComponentActivity() {
     private var cameraRebindPending = false
     // Limit queued JPEGs while one full-resolution image is being processed.
     private var pendingPhotoCount = 0
-    private val maxPendingPhotos = 5
+        set(value) {
+            val completed = (field - value).coerceAtLeast(0)
+            field = value
+            repeat(completed) { PhotoProcessingService.complete() }
+        }
+    private val maxPendingPhotos: Int get() = PhotoQueueBudget.limit(this,
+        if (multiFrameDetailEnabled || activeMode == ReferenceRenderer.Mode.NIGHT) 2 else 1,
+        activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE)
+    private val queueRefresh = object : Runnable {
+        override fun run() {
+            if (!isDestroyed && ::shutterButton.isInitialized) refreshShutterAvailability()
+            focusIndicatorHandler.postDelayed(this, 2_000L)
+        }
+    }
     private var statusMessageGeneration = 0
     private val modeButtons = mutableMapOf<ReferenceRenderer.Mode, TextView>()
     private val finishButtons = mutableMapOf<ReferenceRenderer.Finish, TextView>()
@@ -237,7 +250,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
         analysisExecutor = Executors.newSingleThreadExecutor()
-        photoProcessingExecutor = Executors.newSingleThreadExecutor()
+        photoProcessingExecutor = PhotoProcessingService.executor
         multiFrameDetailEnabled = getPreferences(MODE_PRIVATE).getBoolean("multi_frame_detail_enabled", false)
         bokehLevel = getPreferences(MODE_PRIVATE).getInt("bokeh_level", 0).coerceIn(0, 3)
         nightEnhancementEnabled = getPreferences(MODE_PRIVATE).getBoolean("night_enhancement_enabled", false)
@@ -618,6 +631,7 @@ class MainActivity : ComponentActivity() {
             background = rounded(0xee111216.toInt(), 20)
             setPadding(dp(10), dp(8), dp(10), dp(8))
             elevation = dp(8).toFloat()
+            isClickable = true // Consume gaps and padding instead of focusing the preview behind the menu.
             visibility = View.GONE
         }
         moreMenuPanel.addView(strengthRow)
@@ -635,10 +649,10 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         helpButtons = LinearLayout(this).apply {
-            addView(pill("User guide") { showUserGuide() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(4) })
-            addView(pill("Quick tutorial") { startTutorial() }, LinearLayout.LayoutParams(0, dp(36), 1f))
+            addView(pill("User guide") { showUserGuide() }.apply { textSize = 11f }, LinearLayout.LayoutParams(0, dp(26), 1f).apply { marginEnd = dp(6) })
+            addView(pill("Quick tutorial") { startTutorial() }.apply { textSize = 11f }, LinearLayout.LayoutParams(0, dp(26), 1f))
         }
-        moreMenuPanel.addView(helpButtons, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(6) })
+        moreMenuPanel.addView(helpButtons, LinearLayout.LayoutParams(-1, dp(26)).apply { topMargin = dp(6) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         bottomPanel.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
             if (resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
@@ -1834,7 +1848,7 @@ class MainActivity : ComponentActivity() {
         val menuWasOpen = moreMenuExpanded
         val steps = listOf(
             HelpTour.Step("Take a photo", "Tap the white shutter. The Polaroid border confirms capture; wait for the saved message. In Long exp., hold the shutter and release to finish. Try it for flowing water or light trails.") { shutterButton },
-            HelpTour.Step("Choose a mode", "Tap a name or drag the ribbed selector. Day is for everyday scenes; Night for dim light; Bokeh for separated subjects; Sunset for warm skies; Landscape for scenery. Modes change when you release the selector.") { if (landscapeControlsActive == true) verticalModeScroll else modeScroll },
+            HelpTour.Step("Choose a mode", "Tap a name or drag the ribbed selector. Day is for everyday scenes; Night for dim light; Bokeh for separated subjects; Sunset for warm skies; Landscape for scenery. Modes change when you release the selector.", extraTargets = { listOf(modeDial) }) { if (landscapeControlsActive == true) verticalModeScroll else modeScroll },
             HelpTour.Step("Zoom and focus", "Drag this rail or pinch the image to zoom. Yellow marks show major positions. Tap your subject in the image to focus; black borders are not focus targets. Try a wider view for scenery and tighter framing for details.") { zoomRow },
             HelpTour.Step("AF, Infinity and Macro", "AF suits everyday photos. Infinity is for distant subjects and disables Bokeh blur. Macro requests a supported close-focusing camera with autofocus—try flowers or small objects. Availability depends on the phone.") { infinityFocusButton },
             HelpTour.Step("Flash and camera", "Flash can light nearby subjects but may reflect off glass. Use the camera-switch button for front or rear views; it moves beneath B&W in landscape.") { flashButton },
@@ -1905,14 +1919,15 @@ class MainActivity : ComponentActivity() {
     private fun startLongExposureHold() {
         if (longExposureHoldActive) return
         if (isBusy) return
-        if (pendingPhotoCount >= maxPendingPhotos) {
-            message("Photo queue is full; wait for a save to finish.")
+        if (PhotoProcessingService.pendingCount >= maxPendingPhotos) {
+            message("Photo buffer needs more free memory; wait for a save to finish.")
             return
         }
         if (imageCapture == null) {
             message("Camera is starting. Try again in a moment.")
             return
         }
+        if (!beginPhotoProcessing()) return
         longExposureHoldActive = true
         longExposureFrameCaptureInFlight = false
         longExposureFrameProcessing = false
@@ -1954,6 +1969,7 @@ class MainActivity : ComponentActivity() {
                 val frame = try {
                     check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
                     val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
+                    PhotoQueueBudget.observe(buffer.remaining(), image.width, image.height)
                     ByteArray(buffer.remaining()).also { buffer.get(it) }
                         .let { LongExposureMerger.Frame(it, image.imageInfo.rotationDegrees) }
                 } catch (_: Exception) { null }
@@ -2085,6 +2101,12 @@ class MainActivity : ComponentActivity() {
         updateStatus()
     }
 
+    private fun beginPhotoProcessing(): Boolean {
+        if (PhotoProcessingService.begin(this)) return true
+        message("Could not start background photo processing. Please reopen the camera and try again.")
+        return false
+    }
+
     private fun capture() {
         if (isBusy) return
         if (activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE) {
@@ -2092,11 +2114,12 @@ class MainActivity : ComponentActivity() {
             longExposureHandler.postDelayed({ if (longExposureHoldActive) finishLongExposureHold() }, 1_000L)
             return
         }
-        if (pendingPhotoCount >= maxPendingPhotos) {
-            message("Photo queue is full; wait for a save to finish.")
+        if (PhotoProcessingService.pendingCount >= maxPendingPhotos) {
+            message("Photo buffer needs more free memory; wait for a save to finish.")
             return
         }
         val capture = imageCapture ?: run { message("Camera is starting. Try again in a moment."); return }
+        if (!beginPhotoProcessing()) return
         isBusy = true
         pendingPhotoCount++
         shutterButton.isEnabled = false
@@ -2223,6 +2246,7 @@ class MainActivity : ComponentActivity() {
                 val jpeg = try {
                     check(image.format == android.graphics.ImageFormat.JPEG) { "Camera returned an unsupported image format" }
                     val buffer = image.planes.firstOrNull()?.buffer?.duplicate() ?: error("Camera returned no image data")
+                    PhotoQueueBudget.observe(buffer.remaining(), image.width, image.height)
                     ByteArray(buffer.remaining()).also { buffer.get(it) }
                 } catch (e: Exception) {
                     image.close()
@@ -2359,6 +2383,7 @@ class MainActivity : ComponentActivity() {
                         check(image.format == android.graphics.ImageFormat.JPEG) { "Night capture returned an unsupported image format" }
                         val buffer = image.planes.firstOrNull()?.buffer?.duplicate()
                             ?: error("Night capture returned no image data")
+                        PhotoQueueBudget.observe(buffer.remaining(), image.width, image.height)
                         val jpeg = ByteArray(buffer.remaining())
                         buffer.get(jpeg)
                         nextFrame = NightBurstMerger.Frame(jpeg, image.imageInfo.rotationDegrees, sensorDepth?.takeIf { kotlin.math.abs(currentZoomRatio - 1f) < 0.001f }?.match(image.imageInfo.timestamp, image.imageInfo.rotationDegrees))
@@ -2426,9 +2451,8 @@ class MainActivity : ComponentActivity() {
             )
             val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
                 timed("bokeh") {
-                    val guide = stackGuide ?: sensorSample?.let { PortraitBlur.prepareStack(this@MainActivity, upright, focus, it) }
-                    if (guide != null) PortraitBlur.applyStack(styled, guide, focus, bokehLevelAtCapture)
-                    else PortraitBlur.apply(this@MainActivity, styled, focus.first, focus.second, bokehLevelAtCapture)
+                    val guide = stackGuide ?: PortraitBlur.prepareStack(applicationContext, upright, focus, sensorSample)
+                    PortraitBlur.applyStack(styled, guide, focus, bokehLevelAtCapture)
                 }
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
@@ -2441,7 +2465,7 @@ class MainActivity : ComponentActivity() {
             runOnUiThread {
                 pendingPhotoCount = (pendingPhotoCount - 1).coerceAtLeast(0)
                 refreshShutterAvailability()
-                updateThumbnail(rendered)
+                if (!isDestroyed) updateThumbnail(rendered)
                 message(if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture && savedPortrait?.usedDepth != true && savedPortrait?.subjectDetected != true)
                     "Saved; Bokeh blur could not detect usable depth or a person" else if (pendingPhotoCount > 0)
                     "Photo saved; processing the next photo" else "Photo saved to Pictures/UltraTone")
@@ -2516,6 +2540,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        focusIndicatorHandler.removeCallbacks(queueRefresh)
+        focusIndicatorHandler.post(queueRefresh)
         if (!::thumbnailButton.isInitialized) return
         val generation = ++thumbnailGeneration
         thumbnailExecutor.execute {
@@ -2697,7 +2723,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshShutterAvailability() {
         if (!::shutterButton.isInitialized) return
-        shutterButton.isEnabled = imageCapture != null && !isBusy && pendingPhotoCount < maxPendingPhotos
+        shutterButton.isEnabled = imageCapture != null && !isBusy && PhotoProcessingService.pendingCount < maxPendingPhotos
         updateLongExposureHint()
     }
 
@@ -2733,6 +2759,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         if (longExposureHoldActive) finishLongExposureHold()
+        focusIndicatorHandler.removeCallbacks(queueRefresh)
         super.onPause()
     }
 
@@ -2742,6 +2769,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        focusIndicatorHandler.removeCallbacks(queueRefresh)
         helpTour?.dismiss()
         helpPrompt?.dismiss()
         guideDialog?.dismiss()
@@ -2755,7 +2783,6 @@ class MainActivity : ComponentActivity() {
         liveCameraEffect = null
         thumbnailExecutor.shutdown()
         cameraExecutor.shutdown()
-        photoProcessingExecutor.shutdown()
         analysisExecutor.execute { livePortraitProcessor?.close(); livePortraitProcessor = null }
         analysisExecutor.shutdown()
         sourceBitmap = null

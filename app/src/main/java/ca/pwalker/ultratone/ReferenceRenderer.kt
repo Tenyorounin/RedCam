@@ -139,8 +139,8 @@ object ReferenceRenderer {
                     if (effects.glow) {
                         val bloom = smoothstep(0.68f, 0.97f, glowSource) * 0.075f
                         nr += bloom
-                        ng += bloom * 0.98f
-                        nb += bloom * 0.92f
+                        ng += bloom * if (finish == Finish.BLACK_AND_WHITE) 1f else 0.98f
+                        nb += bloom * if (finish == Finish.BLACK_AND_WHITE) 1f else 0.92f
                     }
                 }
 

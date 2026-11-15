@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
@@ -26,7 +27,7 @@ internal class HelpTour(
     private val prepare: (Int) -> Unit,
     private val finished: () -> Unit
 ) {
-    data class Step(val title: String, val text: String, val target: () -> View)
+    data class Step(val title: String, val text: String, val extraTargets: () -> List<View> = { emptyList() }, val target: () -> View)
     private var index = 0
     private val dialog = Dialog(activity)
     private val title = TextView(activity).apply { textSize = 18f; setTextColor(0xffffd052.toInt()) }
@@ -63,6 +64,7 @@ internal class HelpTour(
         }
     }
     private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener { positionCard() }
+    private val drawListener = ViewTreeObserver.OnPreDrawListener { positionCard(); true }
 
     init {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
@@ -78,6 +80,7 @@ internal class HelpTour(
         dialog.setContentView(root)
         dialog.setOnDismissListener {
             activity.window.decorView.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
+            activity.window.decorView.viewTreeObserver.removeOnPreDrawListener(drawListener)
             root.viewTreeObserver.removeOnGlobalLayoutListener(layoutListener)
             finished()
         }
@@ -91,6 +94,7 @@ internal class HelpTour(
             setLayout(-1, -1)
         }
         activity.window.decorView.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
+        activity.window.decorView.viewTreeObserver.addOnPreDrawListener(drawListener)
         root.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
         showStep()
     }
@@ -109,14 +113,21 @@ internal class HelpTour(
 
     private fun positionCard() {
         if (root.width == 0 || root.height == 0) return
-        val target = steps[index].target()
-        val location = IntArray(2)
+        // Visible global bounds include rotation, scaling and parent clipping. Raw width/height
+        // do not describe the on-screen shape of the rotated landscape mode selector.
         val origin = IntArray(2)
         root.getLocationOnScreen(origin)
-        target.getLocationOnScreen(location)
-        root.hole.set((location[0] - origin[0] - dp(4)).toFloat(), (location[1] - origin[1] - dp(4)).toFloat(),
-            (location[0] - origin[0] + target.width + dp(4)).toFloat(), (location[1] - origin[1] + target.height + dp(4)).toFloat())
-        if (!target.isShown || !root.hole.intersect(0f, 0f, root.width.toFloat(), root.height.toFloat())) root.hole.setEmpty()
+        root.hole.setEmpty()
+        for (target in listOf(steps[index].target()) + steps[index].extraTargets()) {
+            val visible = Rect()
+            if (!target.isShown || !target.getGlobalVisibleRect(visible)) continue
+            val targetOrigin = IntArray(2)
+            target.rootView.getLocationOnScreen(targetOrigin)
+            visible.offset(targetOrigin[0] - origin[0], targetOrigin[1] - origin[1])
+            root.hole.union(RectF(visible))
+        }
+        if (!root.hole.isEmpty) root.hole.inset(-dp(3).toFloat(), -dp(3).toFloat())
+        if (!root.hole.intersect(0f, 0f, root.width.toFloat(), root.height.toFloat())) root.hole.setEmpty()
         val lp = card.layoutParams as FrameLayout.LayoutParams
         val landscape = root.width > root.height
         val gravity = if (landscape) Gravity.CENTER_VERTICAL or
