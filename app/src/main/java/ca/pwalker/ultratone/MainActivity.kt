@@ -101,6 +101,10 @@ class MainActivity : ComponentActivity() {
     private var macroFocusEnabled = false
     @Volatile private var sculptEnabled = false
     @Volatile private var glowEnabled = false
+    private var helpTour: HelpTour? = null
+    private var helpPrompt: android.app.AlertDialog? = null
+    private var guideDialog: android.app.AlertDialog? = null
+    private lateinit var helpButtons: LinearLayout
     private lateinit var moreMenuPanel: LinearLayout
     @Volatile private var vignetteEnabled = false
     private var infinityFocusSupported = false
@@ -222,6 +226,7 @@ class MainActivity : ComponentActivity() {
 
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) startCamera() else message("Camera permission is needed to take photos.")
+        offerTutorial()
     }
     private val choosePhoto = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) loadUri(uri)
@@ -243,6 +248,7 @@ class MainActivity : ComponentActivity() {
         buildScreen()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
+            offerTutorial()
         } else requestCamera.launch(Manifest.permission.CAMERA)
     }
 
@@ -628,6 +634,11 @@ class MainActivity : ComponentActivity() {
         moreMenuPanel.addView(creativeEffectsRow, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
+        helpButtons = LinearLayout(this).apply {
+            addView(pill("User guide") { showUserGuide() }, LinearLayout.LayoutParams(0, dp(36), 1f).apply { marginEnd = dp(4) })
+            addView(pill("Quick tutorial") { startTutorial() }, LinearLayout.LayoutParams(0, dp(36), 1f))
+        }
+        moreMenuPanel.addView(helpButtons, LinearLayout.LayoutParams(-1, dp(36)).apply { topMargin = dp(6) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         bottomPanel.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
             if (resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
@@ -1788,6 +1799,64 @@ class MainActivity : ComponentActivity() {
         nightEnhancementButton.contentDescription = "Night-only low-light enhancement, $state"
     }
 
+    private fun offerTutorial() {
+        if (getPreferences(MODE_PRIVATE).getBoolean("tutorial_offered_v1", false)) return
+        controlOverlay.post {
+            if (isDestroyed || isFinishing || helpPrompt?.isShowing == true ||
+                getPreferences(MODE_PRIVATE).getBoolean("tutorial_offered_v1", false)) return@post
+            fun remember() { getPreferences(MODE_PRIVATE).edit().putBoolean("tutorial_offered_v1", true).apply() }
+            helpPrompt = android.app.AlertDialog.Builder(this)
+                .setTitle("Welcome to UltraTone")
+                .setMessage("Would you like a quick tour of the camera controls and effects? You can exit at any time.")
+                .setPositiveButton("Yes") { _, _ -> remember(); startTutorial() }
+                .setNegativeButton("No") { _, _ -> remember() }
+                .setOnCancelListener { remember() }
+                .show()
+        }
+    }
+
+    private fun showUserGuide() {
+        val text = TextView(this).apply {
+            text = assets.open("user-guide.txt").bufferedReader().use { it.readText() }
+            textSize = 16f
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            setTextIsSelectable(true)
+        }
+        guideDialog = android.app.AlertDialog.Builder(this).setTitle("UltraTone user guide")
+            .setView(android.widget.ScrollView(this).apply { addView(text) })
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Quick tutorial") { _, _ -> startTutorial() }.show()
+    }
+
+    private fun startTutorial() {
+        if (isBusy || longExposureHoldActive) { message("Finish the current capture before starting the tutorial."); return }
+        if (helpTour != null) return
+        val menuWasOpen = moreMenuExpanded
+        val steps = listOf(
+            HelpTour.Step("Take a photo", "Tap the white shutter. The Polaroid border confirms capture; wait for the saved message. In Long exp., hold the shutter and release to finish. Try it for flowing water or light trails.") { shutterButton },
+            HelpTour.Step("Choose a mode", "Tap a name or drag the ribbed selector. Day is for everyday scenes; Night for dim light; Bokeh for separated subjects; Sunset for warm skies; Landscape for scenery. Modes change when you release the selector.") { if (landscapeControlsActive == true) verticalModeScroll else modeScroll },
+            HelpTour.Step("Zoom and focus", "Drag this rail or pinch the image to zoom. Yellow marks show major positions. Tap your subject in the image to focus; black borders are not focus targets. Try a wider view for scenery and tighter framing for details.") { zoomRow },
+            HelpTour.Step("AF, Infinity and Macro", "AF suits everyday photos. Infinity is for distant subjects and disables Bokeh blur. Macro requests a supported close-focusing camera with autofocus—try flowers or small objects. Availability depends on the phone.") { infinityFocusButton },
+            HelpTour.Step("Flash and camera", "Flash can light nearby subjects but may reflect off glass. Use the camera-switch button for front or rear views; it moves beneath B&W in landscape.") { flashButton },
+            HelpTour.Step("Colour or B&W", "Choose Colour for the scene's colours, or B&W for shapes, texture and strong shadows. Your choice affects the preview and saved photo.") { finishRow },
+            HelpTour.Step("Your photos", "The thumbnail shows the latest UltraTone photo. Tap to browse, then long-press a photo for Edit, Delete or Move. Delete asks for confirmation; Move takes it out of this album.") { thumbnailButton },
+            HelpTour.Step("Open More", "Tap More to reveal style, exposure, Photo Stack and creative effects, plus the user guide. The next steps open this panel for you.") { moreButton },
+            HelpTour.Step("More: style and exposure", "More contains extra controls. Style adjusts the strength of the rendering. EV changes camera brightness when supported: lower it for bright skies, raise it for dark subjects. These are useful before capturing difficult light.") { strengthRow },
+            HelpTour.Step("Photo Stack and Night", "Photo Stack combines two captures for detail and reduced noise. Try a stationary subject and hold steady; movement can cause artifacts. Night enhance appears in Night mode for an additional low-light treatment.") { detailMergeButton },
+            HelpTour.Step("Bokeh strength", "In Bokeh mode, cycle Normal, Extra, Max and Rings. Use a distinct subject with lights behind it. Rings adds large highlight circles without extra background blur. Reflections and fine edges may confuse the depth estimate.") { bokehButton },
+            HelpTour.Step("Glow, Vignette and Sculpt", "Glow spreads existing highlights—try lamps or backlighting. Vignette darkens edges to draw attention inward. Sculpt emphasises existing light and shadow—try side-lit faces, textures or architecture. All also work with B&W.") { creativeEffectsRow },
+            HelpTour.Step("Help any time", "Open User guide for detailed instructions, examples and limitations. Quick tutorial replays this tour. Your selected mode and effects have not been changed.") { helpButtons }
+        )
+        helpTour = HelpTour(this, steps, { index ->
+            moreMenuExpanded = index >= 8
+            updateMoreMenu()
+        }, {
+            helpTour = null
+            moreMenuExpanded = menuWasOpen
+            updateMoreMenu()
+        }).also { it.show() }
+    }
+
     private fun updateMoreMenu() {
         if (!::detailMergeButton.isInitialized || !::bokehButton.isInitialized || !::nightEnhancementButton.isInitialized) return
         val show = moreMenuExpanded && previewView.visibility == View.VISIBLE
@@ -2673,6 +2742,9 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        helpTour?.dismiss()
+        helpPrompt?.dismiss()
+        guideDialog?.dismiss()
         focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
         longExposureHandler.removeCallbacks(longExposureTicker)
         super.onDestroy()
