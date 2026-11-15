@@ -649,8 +649,8 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, dp(32)
         ).apply { topMargin = dp(2); bottomMargin = dp(2) })
         helpButtons = LinearLayout(this).apply {
-            addView(pill("User guide") { showUserGuide() }.apply { textSize = 11f }, LinearLayout.LayoutParams(0, dp(26), 1f).apply { marginEnd = dp(6) })
-            addView(pill("Quick tutorial") { startTutorial() }.apply { textSize = 11f }, LinearLayout.LayoutParams(0, dp(26), 1f))
+            addView(pill("User guide") { showUserGuide() }.apply { textSize = 10f }, LinearLayout.LayoutParams(0, dp(26), 1f).apply { marginEnd = dp(6) })
+            addView(pill("Quick tutorial") { startTutorial() }.apply { textSize = 10f }, LinearLayout.LayoutParams(0, dp(26), 1f))
         }
         moreMenuPanel.addView(helpButtons, LinearLayout.LayoutParams(-1, dp(26)).apply { topMargin = dp(6) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -2723,7 +2723,8 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshShutterAvailability() {
         if (!::shutterButton.isInitialized) return
-        shutterButton.isEnabled = imageCapture != null && !isBusy && PhotoProcessingService.pendingCount < maxPendingPhotos
+        shutterButton.isEnabled = longExposureHoldActive ||
+            (imageCapture != null && !isBusy && PhotoProcessingService.pendingCount < maxPendingPhotos)
         updateLongExposureHint()
     }
 
