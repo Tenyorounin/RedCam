@@ -166,8 +166,10 @@ class MainActivity : ComponentActivity() {
             repeat(completed) { PhotoProcessingService.complete() }
         }
     private val maxPendingPhotos: Int get() = PhotoQueueBudget.limit(this,
-        if (multiFrameDetailEnabled || activeMode == ReferenceRenderer.Mode.NIGHT) 2 else 1,
-        activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE)
+        if (multiFrameDetailEnabled || (activeMode == ReferenceRenderer.Mode.NIGHT &&
+            !nightExtensionActive && flashMode == ImageCapture.FLASH_MODE_OFF)) 2 else 1,
+        activeMode == ReferenceRenderer.Mode.LONG_EXPOSURE,
+        activeMode == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusEnabled)
     private val queueRefresh = object : Runnable {
         override fun run() {
             if (!isDestroyed && ::shutterButton.isInitialized) refreshShutterAvailability()
