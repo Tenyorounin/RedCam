@@ -20,7 +20,10 @@ internal object PhotoQueueBudget {
         val count = PhotoProcessingService.pendingCount
         val info = ActivityManager.MemoryInfo()
         context.getSystemService(ActivityManager::class.java).getMemoryInfo(info)
-        if (info.lowMemory) return count
+        // The estimate governs *additional buffering*, not whether an idle camera works.
+        // Reserves can exceed an ordinary app heap even though one photo is viable.
+        // Keep the established one-photo path available; never deadlock at zero capacity.
+        if (info.lowMemory) return maxOf(1, count)
         val runtime = Runtime.getRuntime()
         val heapFree = runtime.maxMemory() - (runtime.totalMemory() - runtime.freeMemory())
         // Reserve pixel arrays for merging, plus native bitmaps, depth inference and camera buffers.
@@ -31,6 +34,6 @@ internal object PhotoQueueBudget {
             .coerceAtLeast(0) / perPhoto).coerceAtMost(32).toInt()
         val queueBudget = minOf(runtime.maxMemory() / 3, info.totalMem / 32, 256 * MIB)
         val budgetCount = (queueBudget / perPhoto).coerceIn(1, 32).toInt()
-        return minOf(count + extra, budgetCount, 32)
+        return minOf(count + extra, budgetCount, 32).coerceAtLeast(1)
     }
 }

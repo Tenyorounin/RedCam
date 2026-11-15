@@ -39,7 +39,7 @@ object PortraitBlur {
         val weights: ByteArray
     )
 
-    internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>, sensor: SensorDepth.Sample? = null): StackGuide {
+    internal fun prepareStack(context: Context, source: Bitmap, focus: Pair<Float, Float>, sensor: SensorDepth.Sample? = null, includeStackWeights: Boolean = true): StackGuide {
         val segmenter = Segmentation.getClient(
             SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE).build()
         )
@@ -49,6 +49,8 @@ object PortraitBlur {
             catch (_: Exception) { null } finally { segmenter.close() }
         if (estimated == null) return StackGuide(null, person, ByteArray(0))
         val depth = sensor?.fuse(estimated, source.width, source.height) ?: estimated
+        // Final Bokeh only needs depth/person guides. Weights are used solely for stack merging.
+        if (!includeStackWeights) return StackGuide(depth, person, ByteArray(0))
         val (low, high) = depthRange(depth.values)
         val span = (high - low).coerceAtLeast(0.035f)
         val focused = ((focusDepthAt(depth, focus.first, focus.second) - low) / span).coerceIn(0f, 1f)

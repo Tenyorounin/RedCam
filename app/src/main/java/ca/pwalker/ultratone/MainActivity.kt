@@ -2440,20 +2440,29 @@ class MainActivity : ComponentActivity() {
         var enhanced: Bitmap? = null
         var final: Bitmap? = null
         try {
-            val imageForStyle = if (nightEnhanceAtCapture && modeAtCapture == ReferenceRenderer.Mode.NIGHT) {
-                NightEnhancement.apply(upright).also { enhanced = it }
-            } else upright
-            val styled = timed("grade") { ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture, effectsAtCapture) }
-            style = styled
             val focus = mapFocusToFrame(
                 focusXAtCapture, focusYAtCapture, previewSize.width, previewSize.height,
                 upright.width, upright.height, facingAtCapture == CameraSelector.LENS_FACING_FRONT
             )
-            val portrait = if (modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture) (try {
-                timed("bokeh") {
-                    val guide = stackGuide ?: PortraitBlur.prepareStack(applicationContext, upright, focus, sensorSample)
-                    PortraitBlur.applyStack(styled, guide, focus, bokehLevelAtCapture)
+            val needsBokeh = modeAtCapture == ReferenceRenderer.Mode.CLOSE_UP && !infinityFocusAtCapture
+            // Analyse original lighting before allocating the full-resolution styled bitmap.
+            // A photo stack already has a guide: reuse it without running inference again.
+            val portraitGuide = if (needsBokeh) (try {
+                stackGuide ?: timed("depth analysis") {
+                    PortraitBlur.prepareStack(applicationContext, upright, focus, sensorSample, includeStackWeights = false)
                 }
+            } catch (_: Exception) { null }) else null
+            val imageForStyle = if (nightEnhanceAtCapture && modeAtCapture == ReferenceRenderer.Mode.NIGHT) {
+                NightEnhancement.apply(upright).also { enhanced = it }
+            } else upright
+            // Colour/B&W, Sculpt, Glow and Vignette share this single pixel pass.
+            val styled = timed("grade") { ReferenceRenderer.render(imageForStyle, strengthAtCapture, modeAtCapture, zoom, finishAtCapture, effectsAtCapture) }
+            style = styled
+            // Neither Bokeh nor JPEG saving needs the original or enhanced bitmap now.
+            enhanced?.takeIf { !it.isRecycled }?.recycle()
+            upright.recycle()
+            val portrait = if (portraitGuide != null) (try {
+                timed("bokeh") { PortraitBlur.applyStack(styled, portraitGuide, focus, bokehLevelAtCapture) }
             } catch (_: Exception) { null }) else null
             val rendered = portrait?.bitmap ?: styled
             final = rendered
@@ -2483,7 +2492,7 @@ class MainActivity : ComponentActivity() {
             }
         } finally {
             enhanced?.takeIf { !it.isRecycled }?.recycle()
-            upright.recycle()
+            if (!upright.isRecycled) upright.recycle()
         }
     }
 
