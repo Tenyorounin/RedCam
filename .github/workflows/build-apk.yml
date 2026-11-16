@@ -1,4 +1,4 @@
-name: Build debug APK
+name: Build UltraTone release APK
 
 on:
   push:
@@ -38,16 +38,16 @@ jobs:
           gradle-version: '8.9'
           cache-provider: basic
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug
+      - name: Build UltraTone release APK
+        run: gradle --no-daemon :app:assembleRelease
 
-      - name: Name UltraTone APK
-        run: cp app/build/outputs/apk/debug/app-arm64-v8a-debug.apk "app/build/outputs/apk/debug/UltraTone-${GITHUB_RUN_NUMBER}-arm64-v8a-debug.apk"
+      - name: Name UltraTone V1 release APK
+        run: cp app/build/outputs/apk/release/app-arm64-v8a-release.apk "app/build/outputs/apk/release/UltraTone-V1.0-build-${GITHUB_RUN_NUMBER}-arm64-v8a.apk"
 
       - name: Save APK for download
         uses: actions/upload-artifact@v4
         with:
-          name: UltraTone-build-${{ github.run_number }}-arm64-debug-apk
-          path: app/build/outputs/apk/debug/UltraTone-${{ github.run_number }}-arm64-v8a-debug.apk
+          name: UltraTone-V1.0-build-${{ github.run_number }}-release-apk
+          path: app/build/outputs/apk/release/UltraTone-V1.0-build-${{ github.run_number }}-arm64-v8a.apk
           if-no-files-found: error
           retention-days: 14

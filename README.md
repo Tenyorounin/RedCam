@@ -1,4 +1,6 @@
-# UltraTone Camera
+# UltraTone V1.0
+
+Created by Peter Walker.
 
 An Android camera app with an adaptive colour profile and selectable black-and-white finish.
 
@@ -20,6 +22,6 @@ Bokeh blur estimates relative depth rather than measured distance. Hair, thin ob
 
 ## Build and install
 
-GitHub Actions builds an arm64 debug APK for initial Pixel validation. The APK is debug-signed for sideloading, not a Play Store release. The workflow downloads and bundles the depth model, so Bokeh blur works offline after installation; the first build needs network access.
+The established GitHub Actions workflow builds a non-debuggable arm64 release APK named `UltraTone-V1.0-build-<number>-arm64-v8a.apk`. Android version name is `1.0`, version code `64`. The existing signing identity and application ID `ca.pwalker.ultratone` are preserved so this release installs over previous builds. This is a sideloadable APK; it has not been published to Google Play. The workflow downloads and bundles the depth model, so Bokeh blur works offline after installation; the first build needs network access.
 
 Model attribution is listed in [MODEL_NOTICES.md](MODEL_NOTICES.md).

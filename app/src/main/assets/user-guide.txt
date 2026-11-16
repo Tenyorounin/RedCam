@@ -1,4 +1,5 @@
-ULTRATONE USER GUIDE
+ULTRATONE V1.0 USER GUIDE
+Created by Peter Walker
 
 GETTING STARTED
 UltraTone applies its colour or black-and-white rendering to the live viewfinder and saved photos. Give the app camera permission, choose a mode, frame the picture and tap the white shutter. A white Polaroid-style border confirms the capture. Processing and saving can continue afterward; wait for the saved message before assuming a photo is ready.
