@@ -1,4 +1,4 @@
-# UltraTone V1.0
+# UltraTone V1.0.1
 
 Created by Peter Walker.
 
@@ -22,6 +22,6 @@ Bokeh blur estimates relative depth rather than measured distance. Hair, thin ob
 
 ## Build and install
 
-The established GitHub Actions workflow builds a non-debuggable arm64 release APK named `UltraTone-V1.0-build-<number>-arm64-v8a.apk`. Android version name is `1.0`, version code `64`. The existing signing identity and application ID `ca.pwalker.ultratone` are preserved so this release installs over previous builds. This is a sideloadable APK; it has not been published to Google Play. The workflow downloads and bundles the depth model, so Bokeh blur works offline after installation; the first build needs network access.
+The established GitHub Actions workflow builds a non-debuggable arm64 release APK named `UltraTone-V1.0.1-build-<number>-arm64-v8a.apk`. Android version name is `1.0.1`, version code `65`. The existing signing identity and application ID `ca.pwalker.ultratone` are preserved so this release installs over previous builds. This is a sideloadable APK; it has not been published to Google Play. The workflow downloads and bundles the depth model, so Bokeh blur works offline after installation; the first build needs network access.
 
 Model attribution is listed in [MODEL_NOTICES.md](MODEL_NOTICES.md).

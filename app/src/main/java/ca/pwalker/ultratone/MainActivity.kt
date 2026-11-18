@@ -151,6 +151,8 @@ class MainActivity : ComponentActivity() {
     @Volatile private var focusY = 0.5f
     @Volatile private var styleStrength = 0.75f
     private var currentZoomRatio = 1f
+    // Keep the user's selection separate from CameraX's temporary 1x state on rebind.
+    private var requestedZoomRatio = 1f
     @Volatile private var activeMode = ReferenceRenderer.Mode.DAY
     @Volatile private var activeFinish = ReferenceRenderer.Finish.COLOUR
     @Volatile private var lensFacing = CameraSelector.LENS_FACING_BACK
@@ -799,7 +801,7 @@ class MainActivity : ComponentActivity() {
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val camera = boundCamera ?: return false
                 val state = camera.cameraInfo.zoomState.value ?: return false
-                camera.cameraControl.setZoomRatio((currentZoomRatio * detector.scaleFactor).coerceIn(state.minZoomRatio, state.maxZoomRatio))
+                selectZoom((currentZoomRatio * detector.scaleFactor).coerceIn(state.minZoomRatio, state.maxZoomRatio))
                 return true
             }
         })
@@ -1243,6 +1245,11 @@ class MainActivity : ComponentActivity() {
             updateInfinityFocusSupport(camera?.cameraInfo)
             applySelectedFocus()
             configureZoomStops(camera?.cameraInfo)
+            camera?.cameraInfo?.zoomState?.value?.let { state ->
+                // Extensions can have a narrower range. Keep the original selection for
+                // returning to a mode that supports it, while applying a valid ratio here.
+                camera?.cameraControl?.setZoomRatio(requestedZoomRatio.coerceIn(state.minZoomRatio, state.maxZoomRatio))
+            }
             nightExtensionActive = activeMode == ReferenceRenderer.Mode.NIGHT && extensionBound
             livePreviewAvailable = live
             val rearCameraHasFlash = try { provider.getCameraInfo(baseSelector).hasFlashUnit() } catch (_: Exception) { false }
@@ -1471,10 +1478,12 @@ class MainActivity : ComponentActivity() {
 
     private fun selectZoom(requested: Float) {
         val state = boundCamera?.cameraInfo?.zoomState?.value ?: return
-        boundCamera?.cameraControl?.setZoomRatio(requested.coerceIn(state.minZoomRatio, state.maxZoomRatio))
+        requestedZoomRatio = requested.coerceIn(state.minZoomRatio, state.maxZoomRatio)
+        boundCamera?.cameraControl?.setZoomRatio(requestedZoomRatio)
     }
 
     private fun switchCamera() {
+        requestedZoomRatio = 1f
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
         if (lensFacing == CameraSelector.LENS_FACING_FRONT && activeMode == ReferenceRenderer.Mode.NIGHT) {
             activeMode = ReferenceRenderer.Mode.DAY

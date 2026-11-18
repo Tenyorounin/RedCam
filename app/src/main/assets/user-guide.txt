@@ -1,4 +1,4 @@
-ULTRATONE V1.0 USER GUIDE
+ULTRATONE V1.0.1 USER GUIDE
 Created by Peter Walker
 
 GETTING STARTED
@@ -11,7 +11,7 @@ Shutter: tap for a photo. In Long exp., press and hold to collect frames; releas
 
 Modes: tap a name or drag the yellow marker on the ribbed strip. Names highlight as you drag; the mode changes when you release. Portrait scrolls horizontally; landscape scrolls vertically.
 
-Zoom: drag the zoom rail or pinch the viewfinder. Yellow marks identify major zoom positions; releasing nearby snaps to a mark. The available range depends on your phone. A zoom ratio does not always identify a specific physical lens because the phone can choose or combine cameras.
+Zoom: drag the zoom rail or pinch the viewfinder. Yellow marks identify major zoom positions; releasing nearby snaps to a mark. Your selected zoom is retained when changing modes. If a mode supports a narrower range, the app uses the nearest supported zoom and restores your selection when you return to a mode that supports it. Switching between front and rear cameras starts at 1×. The available range depends on your phone. A zoom ratio does not always identify a specific physical lens because the phone can choose or combine cameras.
 
 Focus: tap the actual image, not its black borders, to focus on a subject. The focus point also guides Bokeh depth selection. A tap cannot make a subject sharp if it is closer than the selected lens can focus.
 
