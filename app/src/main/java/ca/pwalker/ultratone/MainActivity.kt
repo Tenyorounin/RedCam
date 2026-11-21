@@ -1849,15 +1849,10 @@ class MainActivity : ComponentActivity() {
         if (supportDialog?.isShowing == true) return
         supportDialog = android.app.AlertDialog.Builder(this)
             .setTitle("Support UltraTone")
-            .setMessage("If you enjoy UltraTone, you can support its development with an optional donation. Choose your own amount in Canadian dollars on PayPal. All features remain available whether you donate or not.\n\nPayPal recipient: pidgeon.jen@gmail.com")
+            .setMessage("If you enjoy UltraTone, you can support its development with an optional donation. Choose your own amount on PayPal. All features remain available whether you donate or not.")
             .setNegativeButton("Close", null)
             .setPositiveButton("Open PayPal") { _, _ ->
-                val link = Uri.parse("https://www.paypal.com/cgi-bin/webscr").buildUpon()
-                    .appendQueryParameter("cmd", "_donations")
-                    .appendQueryParameter("business", "pidgeon.jen@gmail.com")
-                    .appendQueryParameter("item_name", "Support UltraTone")
-                    .appendQueryParameter("currency_code", "CAD")
-                    .build()
+                val link = Uri.parse("https://paypal.me/JenPidgeon")
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, link))
                 } catch (_: android.content.ActivityNotFoundException) {

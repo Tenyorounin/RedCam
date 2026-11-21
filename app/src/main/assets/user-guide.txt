@@ -1,4 +1,4 @@
-ULTRATONE V1.0.2 USER GUIDE
+ULTRATONE V1.0.3 USER GUIDE
 Created by Peter Walker
 
 GETTING STARTED
@@ -79,4 +79,4 @@ The photo buffer adjusts to available system memory, the app's memory limit, pho
 Processing order: merge captured frames and apply Night enhancement when selected, then Colour/B&W, Sculpt, Glow and Vignette in a shared rendering pass, and finally Bokeh/Rings. Bokeh depth analysis uses the original image or the stack's original depth guide, before creative effects can alter its lighting cues. B&W Glow remains neutral.
 
 SUPPORT ULTRATONE
-More → Support UltraTone opens an optional donation message. Select Open PayPal to choose your own amount in Canadian dollars for pidgeon.jen@gmail.com. Payment takes place on PayPal, outside UltraTone. Donations are optional and do not unlock or restrict any camera features. Close the message or return from PayPal whenever you wish.
+More → Support UltraTone opens an optional donation message. Select Open PayPal to choose your own amount through paypal.me/JenPidgeon. Payment takes place on PayPal, outside UltraTone. Donations are optional and do not unlock or restrict any camera features. Close the message or return from PayPal whenever you wish.
