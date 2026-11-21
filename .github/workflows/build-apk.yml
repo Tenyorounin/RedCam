@@ -42,12 +42,12 @@ jobs:
         run: gradle --no-daemon :app:assembleRelease
 
       - name: Name UltraTone V1 release APK
-        run: cp app/build/outputs/apk/release/app-arm64-v8a-release.apk "app/build/outputs/apk/release/UltraTone-V1.0.1-build-${GITHUB_RUN_NUMBER}-arm64-v8a.apk"
+        run: cp app/build/outputs/apk/release/app-arm64-v8a-release.apk "app/build/outputs/apk/release/UltraTone-V1.0.2-build-${GITHUB_RUN_NUMBER}-arm64-v8a.apk"
 
       - name: Save APK for download
         uses: actions/upload-artifact@v4
         with:
-          name: UltraTone-V1.0.1-build-${{ github.run_number }}-release-apk
-          path: app/build/outputs/apk/release/UltraTone-V1.0.1-build-${{ github.run_number }}-arm64-v8a.apk
+          name: UltraTone-V1.0.2-build-${{ github.run_number }}-release-apk
+          path: app/build/outputs/apk/release/UltraTone-V1.0.2-build-${{ github.run_number }}-arm64-v8a.apk
           if-no-files-found: error
           retention-days: 14

@@ -39,8 +39,8 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 65
-        versionName = "1.0.1"
+        versionCode = 66
+        versionName = "1.0.2"
     }
 
     // Preserve the established signing identity so V1 installs over existing UltraTone builds.

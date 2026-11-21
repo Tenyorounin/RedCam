@@ -104,6 +104,7 @@ class MainActivity : ComponentActivity() {
     private var helpTour: HelpTour? = null
     private var helpPrompt: android.app.AlertDialog? = null
     private var guideDialog: android.app.AlertDialog? = null
+    private var supportDialog: android.app.AlertDialog? = null
     private lateinit var helpButtons: LinearLayout
     private lateinit var moreMenuPanel: LinearLayout
     @Volatile private var vignetteEnabled = false
@@ -657,6 +658,10 @@ class MainActivity : ComponentActivity() {
             addView(pill("Quick tutorial") { startTutorial() }.apply { textSize = 10f }, LinearLayout.LayoutParams(0, dp(26), 1f))
         }
         moreMenuPanel.addView(helpButtons, LinearLayout.LayoutParams(-1, dp(26)).apply { topMargin = dp(6) })
+        moreMenuPanel.addView(pill("Support UltraTone") { showSupportDialog() }.apply {
+            textSize = 10f
+            contentDescription = "Support UltraTone with an optional PayPal donation"
+        }, LinearLayout.LayoutParams(-1, dp(26)).apply { topMargin = dp(4) })
         overlay.addView(bottom, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         bottomPanel.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
             if (resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
@@ -1840,6 +1845,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun showSupportDialog() {
+        if (supportDialog?.isShowing == true) return
+        supportDialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Support UltraTone")
+            .setMessage("If you enjoy UltraTone, you can support its development with an optional donation. Choose your own amount in Canadian dollars on PayPal. All features remain available whether you donate or not.\n\nPayPal recipient: pidgeon.jen@gmail.com")
+            .setNegativeButton("Close", null)
+            .setPositiveButton("Open PayPal") { _, _ ->
+                val link = Uri.parse("https://www.paypal.com/cgi-bin/webscr").buildUpon()
+                    .appendQueryParameter("cmd", "_donations")
+                    .appendQueryParameter("business", "pidgeon.jen@gmail.com")
+                    .appendQueryParameter("item_name", "Support UltraTone")
+                    .appendQueryParameter("currency_code", "CAD")
+                    .build()
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, link))
+                } catch (_: android.content.ActivityNotFoundException) {
+                    message("No app is available to open PayPal. Please install a web browser.")
+                }
+            }.show()
+    }
+
     private fun showUserGuide() {
         val text = TextView(this).apply {
             text = assets.open("user-guide.txt").bufferedReader().use { it.readText() }
@@ -2794,6 +2820,7 @@ class MainActivity : ComponentActivity() {
         helpTour?.dismiss()
         helpPrompt?.dismiss()
         guideDialog?.dismiss()
+        supportDialog?.dismiss()
         focusIndicatorHandler.removeCallbacks(hideFocusIndicator)
         longExposureHandler.removeCallbacks(longExposureTicker)
         super.onDestroy()
