@@ -1,0 +1,82 @@
+ULTRATONE V1.0.3 USER GUIDE
+Created by Peter Walker
+
+GETTING STARTED
+UltraTone applies its colour or black-and-white rendering to the live viewfinder and saved photos. Give the app camera permission, choose a mode, frame the picture and tap the white shutter. A white Polaroid-style border confirms the capture. Processing and saving can continue afterward; wait for the saved message before assuming a photo is ready.
+
+The first launch offers an optional quick tutorial. Choose Yes to start or No to continue straight to the camera. Exit or Android Back leaves the tour at any step. More → Quick tutorial replays it. More → User guide opens this guide offline.
+
+MAIN CONTROLS
+Shutter: tap for a photo. In Long exp., press and hold to collect frames; release to finish and save.
+
+Modes: tap a name or drag the yellow marker on the ribbed strip. Names highlight as you drag; the mode changes when you release. Portrait scrolls horizontally; landscape scrolls vertically.
+
+Zoom: drag the zoom rail or pinch the viewfinder. Yellow marks identify major zoom positions; releasing nearby snaps to a mark. Your selected zoom is retained when changing modes. If a mode supports a narrower range, the app uses the nearest supported zoom and restores your selection when you return to a mode that supports it. Switching between front and rear cameras starts at 1×. The available range depends on your phone. A zoom ratio does not always identify a specific physical lens because the phone can choose or combine cameras.
+
+Focus: tap the actual image, not its black borders, to focus on a subject. The focus point also guides Bokeh depth selection. A tap cannot make a subject sharp if it is closer than the selected lens can focus.
+
+AF / ∞ / Macro: this button cycles through autofocus, infinity focus and Macro on supported rear cameras. AF suits everyday scenes. Infinity locks distant focus where supported and disables software Bokeh blur; try it for distant scenery. Macro requests an exposed physical camera with a reported close-focus capability and retains autofocus: useful for flowers, small objects and textures. Availability depends on the phone. If no suitable camera is exposed or binding fails, the app returns to AF with a message. Moving closer than the camera's minimum focus distance still causes blur. Macro is separate from Bokeh.
+
+Flash: cycle the available flash settings. Flash can help a nearby subject in darkness, but may reflect strongly from glass or shiny surfaces. Long Exposure keeps flash off. Availability varies with the selected camera and mode.
+
+Colour / B&W: choose the colour rendering or black-and-white finish for preview and saved photos. B&W can suit architecture, strong shadows and scenes where shape matters more than colour.
+
+Camera switch: change between rear and front cameras. It is at top-right in portrait and beneath B&W in landscape. Features may differ on the front camera.
+
+CHOOSING A MODE
+Day: the general-purpose option for people, street scenes, travel and everyday light.
+
+Night: for dim interiors and evening scenes. Keep the phone steady and ask people to pause. When supported and flash is off, UltraTone can use the phone's Night extension; otherwise it uses its software capture path. Macro uses the software path. Movement can still cause blur or merging artifacts.
+
+Bokeh: adds depth-based background blur and highlight circles. Try a person, flower or object with a clearly separated background. Tap your intended subject. Reflections, transparent objects, hair and thin edges can confuse depth estimation. Check saved results, especially near subject boundaries. It is not a substitute for physically focusing the lens.
+
+Sunset: try it for warm evening light, skies and silhouettes. Use EV to protect bright sky detail. A mode cannot recover detail already clipped in the camera image.
+
+Long exp.: for moving water, light trails and other accumulated-motion effects. Hold the shutter to collect multiple frames, then release to merge and save. The app shows elapsed time and stops at 30 seconds. This is a multi-frame effect; the hold duration is not one continuous sensor exposure. Stabilise the phone or use a tripod. Motion compensation helps align frames but cannot remove all movement artifacts. Live view is not a preview of the finished accumulated effect.
+
+Landscape: for scenery and distant detail. On supported cameras it applies a calculated distant-focus setting; tap the image to focus on a nearer subject instead. Macro keeps autofocus. Choose Infinity explicitly only when your subject is distant.
+
+MORE CONTROLS
+UltraTone Style: adjust the strength of the rendering. Reduce it for a gentler result; increase it when you want a stronger treatment. Some other controls have their own independent effect.
+
+EV: changes camera exposure compensation where supported. Negative values darken the capture and can preserve a bright sky; positive values brighten a dark subject. It does not repair an already captured photo. Availability and range depend on the camera.
+
+Photo Stack: combines two captures for additional detail and reduced noise. It is useful for stationary subjects, textures and handheld scenes where alignment can help. Moving subjects can produce artifacts. It adds capture/processing work. In Bokeh, stacking is guided toward the sharp subject region so it does not fight the intended blur. It is not a guarantee that a blurred photo will become sharp.
+
+Bokeh strength: cycles Normal → Extra → Max → Rings. Normal gives a gentler background treatment; Extra and Max increase the effect. Rings uses large highlight circles without adding the extra background blur. Bright, compact lights behind the subject are good candidates. A broad bright wall should not be expected to become a field of light circles. These controls affect Bokeh mode, and Infinity disables its software blur.
+
+Night enhance: an additional low-light processing option, shown in More while Night is selected. Try it in very dim scenes where visibility matters more than a restrained result. It may change fine texture and take longer to process. Compare it on and off for your scene.
+
+Glow: softens and spreads existing bright areas. Try backlit foliage, lamps or luminous evening scenes. Strong highlights can become hazier; it does not create a real light source.
+
+Vignette: darkens the outer image to draw attention inward. Useful for a central subject or a more concentrated composition; switch it off when edge detail matters.
+
+Sculpt: shapes existing highlights and shadows to emphasise form. Try side-lit faces, textured objects, architecture or dramatic B&W. It enhances lighting already in the image rather than creating accurate new studio lighting.
+
+ALBUM AND FILES
+The album button loads a thumbnail of the latest accessible UltraTone photo when the camera opens or resumes. New captures also update it. Photos are saved as JPEGs in Pictures/UltraTone; the app's album lists photos in that folder.
+
+Tap the album button to browse. Tap a photo to open it in Google Photos; Google Photos must be installed for that viewer action. Long-press a photo for Edit, Delete or Move.
+
+Edit opens an installed photo editor. The editor controls whether it modifies the original or saves a copy, and where that copy goes. Delete asks for confirmation and permanently removes the photo. Move chooses an accessible Pictures album or creates a new one; moved photos leave the UltraTone album. Moving requires Android 10 or later. Android may ask for permission to modify a photo. Canceling that request leaves the operation incomplete.
+
+The album reloads when you return from an editor, and after deleting or moving. Returning to the camera refreshes its thumbnail. If the album is empty, the generic album icon appears.
+
+CAPTURE AND QUALITY TIPS
+Hold still through capture, particularly in Night and Photo Stack. Multiple photos can queue behind earlier work. A successful shutter animation is not the same as a completed gallery save.
+
+Bokeh preview and final photo are processed at different resolutions, so boundaries and highlights may differ. Review the saved photo when the effect matters.
+
+When a close object will not focus, try Macro, tap the subject and move back slightly. When depth blur covers the wrong area, choose a clearer subject/background separation or a gentler Bokeh setting. When highlights are too bright, lower EV before taking the next picture.
+
+Settings and capabilities vary by phone. Changing focus mode or camera configuration can briefly interrupt the preview and may produce a faint physical lens sound. The tutorial does not take photos or change your selected effects.
+
+PROCESSING WITH THE SCREEN LOCKED
+Once the camera has delivered a photo, queued processing and saving continue when you lock the screen or switch apps. UltraTone uses a temporary background processing service and keeps the CPU awake while work remains (up to a 30-minute wake lease). The camera itself does not keep taking photos in the background. Locking during a Long Exposure ends collection and saves usable frames already captured. Wait for capture to finish before locking during a photo stack or Night burst. Force-stopping the app, restarting the phone or the system terminating the process can still lose unsaved work; the queue is not a disk-backed recovery system.
+
+The photo buffer adjusts to available system memory, the app's memory limit, photo resolution and estimated compressed-frame size. Photo Stack and software Night bursts need space for two frames. Day uses a smaller working-memory reserve than Bokeh, Photo Stack or Long Exposure. Buffer estimates use observed JPEG sizes, with separate allowances for Java arrays and native bitmaps. Space is reserved for processing, camera buffers and depth analysis. The buffer may hold more or fewer than five photos; additional captures temporarily become unavailable when the queue needs to drain. When no photos remain queued, the camera allows one photo even if the conservative buffer estimate finds no extra capacity. More queued photos do not make processing faster. Photos are processed one at a time to limit peak memory use.
+
+Processing order: merge captured frames and apply Night enhancement when selected, then Colour/B&W, Sculpt, Glow and Vignette in a shared rendering pass, and finally Bokeh/Rings. Bokeh depth analysis uses the original image or the stack's original depth guide, before creative effects can alter its lighting cues. B&W Glow remains neutral.
+
+SUPPORT ULTRATONE
+More → Support UltraTone opens an optional donation message. Select Open PayPal to choose your own amount through paypal.me/JenPidgeon. Payment takes place on PayPal, outside UltraTone. Donations are optional and do not unlock or restrict any camera features. Close the message or return from PayPal whenever you wish.

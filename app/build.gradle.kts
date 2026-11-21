@@ -39,8 +39,30 @@ android {
         applicationId = "ca.pwalker.ultratone"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.4.9"
+        versionCode = 67
+        versionName = "1.0.3"
+    }
+
+    // Preserve the established signing identity so V1 installs over existing UltraTone builds.
+    signingConfigs {
+        create("sharedDebug") {
+            storeFile = file("ultratone-ci-debug.keystore")
+            storePassword = "android"
+            keyAlias = "ultratone-debug"
+            keyPassword = "android"
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
+        }
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
+            isDebuggable = false
+            // Preserve the validated processing code and reflected model dependencies.
+            isMinifyEnabled = false
+        }
     }
 
     // Build the arm64 APK first. Other Android ABIs can be added after validating
